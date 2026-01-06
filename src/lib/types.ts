@@ -12,8 +12,8 @@ export type JournalEntry = {
   dateISO: string;
   memo: string;
   currency: Currency;
-  entityId: string; // NEW
-  businessUnitId?: string; // NEW
+  entityId: string;
+  businessUnitId?: string;
   lines: JournalLine[];
 };
 
@@ -82,6 +82,52 @@ export type ComposerState = {
 
   useARAP: boolean;
 
-  entityId: string; // NEW
-  businessUnitId?: string; // NEW
+  entityId: string;
+  businessUnitId?: string;
+};
+
+// -------------------------
+// Assets + Liabilities (NEW)
+// -------------------------
+
+export type DepreciationMethod = "straight_line_monthly";
+
+export type Asset = {
+  id: string;
+  entityId: string;
+  businessUnitId?: string;
+
+  name: string;
+  purchaseDateISO: string; // YYYY-MM-DD
+  cost: number;
+  salvageValue: number; // can be 0
+  usefulLifeMonths: number; // e.g. 36
+
+  currency: Currency;
+
+  // accounts (strictly use these names in the chart)
+  assetAccount: string; // e.g. "Equipment"
+  accumulatedDepAccount: string; // e.g. "Accumulated Depreciation"
+  depreciationExpenseAccount: string; // e.g. "Depreciation Expense"
+
+  method: DepreciationMethod;
+};
+
+export type Liability = {
+  id: string;
+  entityId: string;
+  businessUnitId?: string;
+
+  name: string;
+  startDateISO: string; // YYYY-MM-DD
+  principal: number;
+  annualInterestRate: number; // e.g. 0.08
+  termMonths: number; // e.g. 24
+
+  currency: Currency;
+
+  // accounts (strictly use these names in the chart)
+  liabilityAccount: string; // e.g. "Loan Payable"
+  interestExpenseAccount: string; // e.g. "Interest Expense"
+  cashAccount: string; // e.g. "Cash"
 };

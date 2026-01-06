@@ -1,4 +1,3 @@
-// src/lib/journalEngine.ts
 import type {
   ActionKind,
   ComposerState,
@@ -173,16 +172,13 @@ function parseCounterparty(text: string, action?: ActionKind): string | undefine
 
 function parseItem(text: string, action?: ActionKind): string | undefined {
   if (action !== "buy" && action !== "sell") return undefined;
-  const m = text.match(
-    /\b(buy|bought|purchase|purchased|sell|sold)\b\s+(.+?)\s+\bfor\b/i
-  );
+  const m = text.match(/\b(buy|bought|purchase|purchased|sell|sold)\b\s+(.+?)\s+\bfor\b/i);
   if (m?.[2]) return m[2].trim();
   return undefined;
 }
 
-// Extract a candidate expense/category from natural language.
-// IMPORTANT: this DOES NOT mean we will post to that account.
-// We will only use it if it exists in the chart (strict allow-list).
+// Candidate expense/category from natural language.
+// STRICT: we only post to it if it exists in allowed accounts map.
 function parseExpenseAccount(text: string): string | undefined {
   const onMatch = text.match(/\bon\s+([^,.;\n]+)$/i);
   if (onMatch?.[1]) return onMatch[1].trim();
@@ -217,10 +213,7 @@ function normalizeAccountKey(s: string) {
   return s.trim().toLowerCase();
 }
 
-function pickAllowedAccountName(
-  candidate: string | undefined,
-  allowedNameMap: Map<string, string> | null
-): string | null {
+function pickAllowedAccountName(candidate: string | undefined, allowedNameMap: Map<string, string> | null): string | null {
   if (!candidate || !allowedNameMap) return null;
   const key = normalizeAccountKey(candidate);
   return allowedNameMap.get(key) ?? null;
@@ -230,7 +223,8 @@ function generateEntryFromEvent(
   ev: ParsedEvent,
   defaults: Pick<ComposerState, "currency" | "vatEnabled" | "vatRate" | "vatInclusive" | "useARAP">,
   context: { dateISO: string; currency: Currency },
-  allowedAccountNameMap: Map<string, string> | null
+  allowedAccountNameMap: Map<string, string> | null,
+  stamp: { entityId: string; businessUnitId?: string }
 ): JournalEntry | null {
   const action = ev.action;
   const amount = ev.amount;
@@ -266,7 +260,6 @@ function generateEntryFromEvent(
     case "buy": {
       const creditAccount = defaults.useARAP ? "Accounts Payable" : "Cash";
 
-      // STRICT: only use a category account if it exists in the chart
       const allowedDebit =
         pickAllowedAccountName(ev.expenseAccount, allowedAccountNameMap) ?? "Purchases / Expense";
 
@@ -284,8 +277,6 @@ function generateEntryFromEvent(
     }
     case "spend": {
       const creditAccount = defaults.useARAP ? "Accounts Payable" : "Cash";
-
-      // STRICT: only use a category account if it exists in the chart
       const allowedDebit =
         pickAllowedAccountName(ev.expenseAccount, allowedAccountNameMap) ?? "Purchases / Expense";
 
@@ -300,14 +291,14 @@ function generateEntryFromEvent(
   if (Math.abs(totalD - totalC) > 0.01) return null;
 
   return {
-  id: makeId(),
-  dateISO,
-  memo,
-  currency,
-  lines,
-  entityId: "entity-default",
-  businessUnitId: undefined,
-};
+    id: makeId(),
+    dateISO,
+    memo,
+    currency,
+    entityId: stamp.entityId,
+    businessUnitId: stamp.businessUnitId,
+    lines,
+  };
 }
 
 export function extractEventsWithContext(text: string): ParsedEvent[] {
@@ -369,14 +360,20 @@ export function extractEventsWithContext(text: string): ParsedEvent[] {
 }
 
 /**
- * NEW: allowedAccounts (optional)
- * If provided, buy/spend will ONLY post to category accounts that exist in allowedAccounts.
- * Otherwise fallback to "Purchases / Expense".
+ * If allowedAccounts is provided, buy/spend will ONLY post to category accounts
+ * that exist in allowedAccounts; otherwise it falls back to "Purchases / Expense".
+ *
+ * NEW:
+ * - opts.entityId / opts.businessUnitId: stamps entries for multi-entity ledger
  */
 export function generateEntriesFromText(
   text: string,
   defaults: Pick<ComposerState, "currency" | "vatEnabled" | "vatRate" | "vatInclusive" | "useARAP">,
-  opts?: { allowedAccounts?: string[] }
+  opts?: {
+    allowedAccounts?: string[];
+    entityId?: string;
+    businessUnitId?: string;
+  }
 ): { events: ParsedEvent[]; entries: JournalEntry[] } {
   const events = extractEventsWithContext(text);
 
@@ -390,6 +387,11 @@ export function generateEntriesFromText(
       ? new Map(opts.allowedAccounts.map((n) => [normalizeAccountKey(n), n] as const))
       : null;
 
+  const stamp = {
+    entityId: opts?.entityId ?? "entity-default",
+    businessUnitId: opts?.businessUnitId,
+  };
+
   const entries: JournalEntry[] = [];
   const running = { ...ctx };
 
@@ -397,7 +399,7 @@ export function generateEntriesFromText(
     if (ev.dateISO) running.dateISO = ev.dateISO;
     if (ev.currency) running.currency = ev.currency;
 
-    const entry = generateEntryFromEvent(ev, defaults, running, allowedAccountNameMap);
+    const entry = generateEntryFromEvent(ev, defaults, running, allowedAccountNameMap, stamp);
     if (entry) entries.push(entry);
   }
 
@@ -422,9 +424,8 @@ export function isBalancedEntry(entry: JournalEntry): boolean {
 
 /**
  * Balance convention:
- * - We store balances as signed numbers:
- *   + => net debit balance
- *   - => net credit balance
+ * + => net debit balance
+ * - => net credit balance
  */
 export function computeBalances(
   accounts: Account[],

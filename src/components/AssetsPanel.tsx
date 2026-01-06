@@ -1,0 +1,226 @@
+"use client";
+
+import React, { useMemo, useState } from "react";
+import type { Asset, Currency, Entity } from "@/lib/types";
+import { Card, CardContent, CardHeader } from "./ui/Card";
+
+function makeId() {
+  return Math.random().toString(16).slice(2) + "-" + Date.now().toString(16);
+}
+
+const currencies: Currency[] = ["AED", "USD", "EUR"];
+
+export default function AssetsPanel({
+  entities,
+  assets,
+  setAssets,
+  activeEntityId,
+}: {
+  entities: Entity[];
+  assets: Asset[];
+  setAssets: React.Dispatch<React.SetStateAction<Asset[]>>;
+  activeEntityId: string;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const active = useMemo(() => entities.find((e) => e.id === activeEntityId) ?? null, [entities, activeEntityId]);
+  const entityAssets = useMemo(() => assets.filter((a) => a.entityId === activeEntityId), [assets, activeEntityId]);
+
+  const [draft, setDraft] = useState<Asset>(() => ({
+    id: makeId(),
+    entityId: activeEntityId,
+    businessUnitId: undefined,
+    name: "New Asset",
+    purchaseDateISO: new Date().toISOString().slice(0, 10),
+    cost: 0,
+    salvageValue: 0,
+    usefulLifeMonths: 36,
+    currency: active?.baseCurrency ?? "AED",
+    assetAccount: "Equipment",
+    accumulatedDepAccount: "Accumulated Depreciation",
+    depreciationExpenseAccount: "Depreciation Expense",
+    method: "straight_line_monthly",
+  }));
+
+  React.useEffect(() => {
+    setDraft((d) => ({
+      ...d,
+      entityId: activeEntityId,
+      currency: active?.baseCurrency ?? d.currency,
+    }));
+  }, [activeEntityId, active?.baseCurrency]);
+
+  function addAsset() {
+    setAssets((prev) => [...prev, { ...draft, id: makeId() }]);
+    setOpen(false);
+  }
+
+  function removeAsset(id: string) {
+    setAssets((prev) => prev.filter((a) => a.id !== id));
+  }
+
+  return (
+    <Card className="mt-6">
+      <CardHeader title="Assets" subtitle="Add assets and auto-generate monthly depreciation entries." />
+      <CardContent>
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-xs text-zinc-400">
+            Entity: <span className="text-zinc-200">{active?.name ?? activeEntityId}</span>
+          </div>
+          <button
+            onClick={() => setOpen(true)}
+            className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-xs text-zinc-200 hover:border-zinc-700"
+          >
+            + Add asset
+          </button>
+        </div>
+
+        {entityAssets.length === 0 ? (
+          <div className="mt-4 text-sm text-zinc-400">No assets for this entity.</div>
+        ) : (
+          <div className="mt-4 space-y-3">
+            {entityAssets.map((a) => (
+              <div key={a.id} className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium text-zinc-100">{a.name}</div>
+                    <div className="mt-1 text-xs text-zinc-400">
+                      {a.purchaseDateISO} • cost {a.cost.toFixed(2)} • salvage {a.salvageValue.toFixed(2)} • life {a.usefulLifeMonths}m
+                    </div>
+                    <div className="mt-2 text-xs text-zinc-500">
+                      Accounts: <span className="text-zinc-300">{a.depreciationExpenseAccount}</span> /{" "}
+                      <span className="text-zinc-300">{a.accumulatedDepAccount}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => removeAsset(a.id)}
+                    className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-300 hover:border-zinc-700"
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {open ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+            <div className="w-full max-w-2xl rounded-2xl border border-zinc-800 bg-zinc-950 shadow-xl">
+              <div className="flex items-center justify-between border-b border-zinc-800 px-5 py-4">
+                <div>
+                  <div className="text-sm font-medium text-zinc-100">Add asset</div>
+                  <div className="mt-1 text-xs text-zinc-400">Monthly straight-line depreciation (MVP).</div>
+                </div>
+                <button
+                  onClick={() => setOpen(false)}
+                  className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-xs text-zinc-200 hover:border-zinc-700"
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="px-5 py-5 space-y-4">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <div>
+                    <label className="text-xs text-zinc-400">Name</label>
+                    <input
+                      value={draft.name}
+                      onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+                      className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-zinc-400">Purchase date</label>
+                    <input
+                      value={draft.purchaseDateISO}
+                      onChange={(e) => setDraft((d) => ({ ...d, purchaseDateISO: e.target.value }))}
+                      className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-zinc-400">Cost</label>
+                    <input
+                      inputMode="decimal"
+                      value={draft.cost}
+                      onChange={(e) => setDraft((d) => ({ ...d, cost: Number(e.target.value) || 0 }))}
+                      className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-zinc-400">Salvage value</label>
+                    <input
+                      inputMode="decimal"
+                      value={draft.salvageValue}
+                      onChange={(e) => setDraft((d) => ({ ...d, salvageValue: Number(e.target.value) || 0 }))}
+                      className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-zinc-400">Useful life (months)</label>
+                    <input
+                      inputMode="numeric"
+                      value={draft.usefulLifeMonths}
+                      onChange={(e) => setDraft((d) => ({ ...d, usefulLifeMonths: Math.max(1, Number(e.target.value) || 1) }))}
+                      className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-zinc-400">Currency</label>
+                    <select
+                      value={draft.currency}
+                      onChange={(e) => setDraft((d) => ({ ...d, currency: e.target.value as Currency }))}
+                      className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                    >
+                      {currencies.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4">
+                  <div className="text-xs text-zinc-400">Account mapping</div>
+                  <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                    {(
+                      [
+                        ["assetAccount", "Asset account (not posted by schedule)"],
+                        ["accumulatedDepAccount", "Accumulated depreciation (Cr)"],
+                        ["depreciationExpenseAccount", "Depreciation expense (Dr)"],
+                      ] as const
+                    ).map(([k, label]) => (
+                      <div key={k}>
+                        <label className="text-xs text-zinc-500">{label}</label>
+                        <input
+                          value={draft[k]}
+                          onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))}
+                          className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-3">
+                  <button
+                    onClick={addAsset}
+                    className="rounded-xl border border-emerald-700 bg-emerald-900/30 px-4 py-2 text-xs font-medium text-emerald-200 hover:bg-emerald-900/40"
+                  >
+                    Save asset
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
