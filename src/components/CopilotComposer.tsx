@@ -3,10 +3,20 @@
 
 import React, { useMemo, useState } from "react";
 import { Card, CardContent, CardHeader } from "./ui/Card";
-import type { Account, ComposerState, JournalEntry, JournalLine } from "@/lib/types";
+import type {
+  Account,
+  ActionKind,
+  ComposerState,
+  Entity,
+  JournalEntry,
+  JournalLine,
+} from "@/lib/types";
 import { generateEntriesFromText } from "@/lib/journalEngine";
 import EntryPreview from "./EntryPreview";
 import AccountsPanel from "./AccountsPanel";
+import EntitiesPanel from "./EntitiesPanel";
+import ConsolidationPreview from "./ConsolidationPreview";
+import SuggestionChips from "./SuggestionChips";
 
 function makeId() {
   return Math.random().toString(16).slice(2) + "-" + Date.now().toString(16);
@@ -24,6 +34,33 @@ const defaultAccounts: Account[] = [
   { id: makeId(), name: "Purchases / Expense", normalSide: "debit", openingBalance: 0 },
   { id: makeId(), name: "Input VAT", normalSide: "debit", openingBalance: 0 },
   { id: makeId(), name: "Output VAT", normalSide: "credit", openingBalance: 0 },
+
+  // optional defaults for consolidation policies
+  { id: makeId(), name: "Intercompany Receivable", normalSide: "debit", openingBalance: 0 },
+  { id: makeId(), name: "Intercompany Payable", normalSide: "credit", openingBalance: 0 },
+  { id: makeId(), name: "Intercompany Loan Receivable", normalSide: "debit", openingBalance: 0 },
+  { id: makeId(), name: "Intercompany Loan Payable", normalSide: "credit", openingBalance: 0 },
+];
+
+const defaultEntities: Entity[] = [
+  {
+    id: DEFAULT_ENTITY_ID,
+    name: "Main Entity",
+    baseCurrency: "AED",
+    businessUnits: [],
+    policy: {
+      ownershipPct: 100,
+      method: "none",
+      functionalCurrency: "AED",
+      intercompany: {
+        enabled: false,
+        arAccount: "Intercompany Receivable",
+        apAccount: "Intercompany Payable",
+        loanRecAccount: "Intercompany Loan Receivable",
+        loanPayAccount: "Intercompany Loan Payable",
+      },
+    },
+  },
 ];
 
 function normalizeName(s: string) {
@@ -37,7 +74,6 @@ function normalizeName(s: string) {
 
 function tokens(s: string): string[] {
   const t = normalizeName(s);
-  // keep "/" separated words too
   return t
     .split(/[\s/]+/g)
     .map((x) => x.trim())
@@ -46,10 +82,8 @@ function tokens(s: string): string[] {
 }
 
 function levenshtein(a: string, b: string) {
-  const aa = a;
-  const bb = b;
-  const m = aa.length;
-  const n = bb.length;
+  const m = a.length;
+  const n = b.length;
   if (m === 0) return n;
   if (n === 0) return m;
 
@@ -61,7 +95,7 @@ function levenshtein(a: string, b: string) {
     dp[0] = i;
     for (let j = 1; j <= n; j++) {
       const tmp = dp[j];
-      const cost = aa[i - 1] === bb[j - 1] ? 0 : 1;
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
       dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + cost);
       prev = tmp;
     }
@@ -76,10 +110,8 @@ function similarity(a: string, b: string) {
 
   if (na === nb) return 1;
 
-  // substring bonus
   if (na.includes(nb) || nb.includes(na)) return 0.92;
 
-  // token overlap
   const ta = new Set(tokens(na));
   const tb = new Set(tokens(nb));
   let inter = 0;
@@ -87,11 +119,9 @@ function similarity(a: string, b: string) {
   const union = ta.size + tb.size - inter;
   const jaccard = union === 0 ? 0 : inter / union;
 
-  // edit distance similarity
   const dist = levenshtein(na, nb);
   const editSim = 1 - dist / Math.max(na.length, nb.length);
 
-  // weighted
   return Math.max(jaccard * 0.75 + editSim * 0.25, editSim * 0.85);
 }
 
@@ -114,13 +144,15 @@ function resolveClosestAccounts(params: {
   minScore?: number;
 }): { entries: JournalEntry[]; unresolved: string[]; resolvedMap: Record<string, string> } {
   const { entries, accounts } = params;
-  const minScore = params.minScore ?? 0.72; // tune this if needed
+  const minScore = params.minScore ?? 0.72;
 
   const byNorm = new Map<string, string>();
   for (const a of accounts) byNorm.set(normalizeName(a.name), a.name);
 
-  // ✅ Fallback account to prevent "invented" accounts appearing in entries
-  const fallback = byNorm.get(normalizeName("Purchases / Expense")) ?? null;
+  const purchasesFallback =
+    byNorm.get(normalizeName("Purchases / Expense")) ??
+    byNorm.get(normalizeName("Purchases")) ??
+    null;
 
   const unresolvedSet = new Set<string>();
   const resolvedMap: Record<string, string> = {};
@@ -130,11 +162,9 @@ function resolveClosestAccounts(params: {
       const rawName = ln.account.trim();
       const norm = normalizeName(rawName);
 
-      // exact/canonical
       const exact = byNorm.get(norm);
       if (exact) return { ...ln, account: exact };
 
-      // find closest existing account
       let bestName: string | null = null;
       let bestScore = 0;
 
@@ -151,14 +181,12 @@ function resolveClosestAccounts(params: {
         return { ...ln, account: bestName };
       }
 
-      // ✅ FIX: do NOT leave unknown accounts in the entry (they look "created")
-      // Instead, route debits to Purchases / Expense when available.
-      if (fallback && (ln.debit || 0) > 0 && (ln.credit || 0) === 0) {
-        resolvedMap[rawName] = fallback;
-        return { ...ln, account: fallback };
+      // Prevent unknown debit accounts from “appearing created”
+      if (purchasesFallback && (ln.debit || 0) > 0 && (ln.credit || 0) === 0) {
+        resolvedMap[rawName] = purchasesFallback;
+        return { ...ln, account: purchasesFallback };
       }
 
-      // leave it unresolved only if we truly can't safely route it
       unresolvedSet.add(rawName);
       return ln;
     });
@@ -171,6 +199,23 @@ function resolveClosestAccounts(params: {
     unresolved: Array.from(unresolvedSet).sort((a, b) => a.localeCompare(b)),
     resolvedMap,
   };
+}
+
+function actionSnippet(k: ActionKind): string {
+  switch (k) {
+    case "borrow":
+      return "on 25/12/25 I borrowed 1000";
+    case "lend":
+      return "on 25/12/25 I lent 1000 to a friend";
+    case "buy":
+      return "I bought 300 AED worth of goods";
+    case "sell":
+      return "I sold goods for 300 AED";
+    case "spend":
+      return "I spent 300 cash on purchases / expense";
+    default:
+      return String(k);
+  }
 }
 
 export default function CopilotComposer() {
@@ -186,6 +231,19 @@ export default function CopilotComposer() {
   });
 
   const [accounts, setAccounts] = useState<Account[]>(defaultAccounts);
+
+  const [entities, setEntities] = useState<Entity[]>(defaultEntities);
+
+  // EntitiesPanel controls this; we keep a separate “selected” id
+  const [activeEntityId, setActiveEntityId] = useState<string>(DEFAULT_ENTITY_ID);
+
+  // ✅ No effect, no setState-in-effect: safe ID derived.
+  const safeEntityId = useMemo(() => {
+    const candidate = activeEntityId || state.entityId;
+    if (entities.some((e) => e.id === candidate)) return candidate;
+    return entities[0]?.id ?? DEFAULT_ENTITY_ID;
+  }, [entities, activeEntityId, state.entityId]);
+
   const [eventsCount, setEventsCount] = useState(0);
   const [entries, setEntries] = useState<JournalEntry[]>([]);
   const [unresolvedAccounts, setUnresolvedAccounts] = useState<string[]>([]);
@@ -194,6 +252,14 @@ export default function CopilotComposer() {
   const needsVATControls = useMemo(() => {
     return /\b(buy|bought|purchase|purchased|sell|sold)\b/i.test(state.text);
   }, [state.text]);
+
+  const accountsByEntity = useMemo(() => {
+    // For now: same chart of accounts per entity.
+    // Later you can store separate COA per entity.
+    const rec: Record<string, Account[]> = {};
+    for (const e of entities) rec[e.id] = accounts;
+    return rec;
+  }, [entities, accounts]);
 
   function generate() {
     const res = generateEntriesFromText(state.text, {
@@ -206,24 +272,22 @@ export default function CopilotComposer() {
 
     setEventsCount(res.events.length);
 
-    // stamp entity/BU
     const stamped: JournalEntry[] = res.entries.map((e) => ({
       ...e,
-      entityId: state.entityId,
+      entityId: safeEntityId,
       businessUnitId: state.businessUnitId,
     }));
 
-    // 1) exact canonicalization (case/spacing)
     const exact = canonicalizeExact(stamped, accounts);
-
-    // 2) fuzzy resolve to closest existing accounts (NO auto-create)
-    // ✅ plus fallback routing to Purchases / Expense for unknown debit accounts
     const resolved = resolveClosestAccounts({ entries: exact, accounts, minScore: 0.72 });
 
     setEntries(resolved.entries);
     setUnresolvedAccounts(resolved.unresolved);
     setResolvedHints(resolved.resolvedMap);
   }
+
+  const activeEntityName =
+    entities.find((e) => e.id === safeEntityId)?.name ?? "—";
 
   return (
     <>
@@ -234,6 +298,48 @@ export default function CopilotComposer() {
         />
         <CardContent>
           <div className="flex flex-col gap-4">
+            {/* Entity selector (simple + always visible) */}
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs text-zinc-400">Active entity</div>
+                  <div className="mt-1 text-sm text-zinc-100">{activeEntityName}</div>
+                </div>
+
+                <select
+                  value={safeEntityId}
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    setActiveEntityId(id);
+                    setState((s) => ({ ...s, entityId: id }));
+                  }}
+                  className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                >
+                  {entities.map((en) => (
+                    <option key={en.id} value={en.id}>
+                      {en.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="mt-2 text-xs text-zinc-400">
+                Add/manage entities below. Generated entries will be stamped to the active entity.
+              </div>
+            </div>
+
+            {/* SuggestionChips API: visible + onPick(ActionKind) */}
+            <SuggestionChips
+              visible={true}
+              onPick={(k: ActionKind) => {
+                const snippet = actionSnippet(k);
+                setState((s) => ({
+                  ...s,
+                  text: s.text?.trim() ? `${s.text.trim()}\n${snippet}` : snippet,
+                }));
+              }}
+            />
+
             <div>
               <label className="mb-2 block text-xs text-zinc-400">Prompt</label>
               <textarea
@@ -382,8 +488,23 @@ I bought 300 AED worth of goods.`}
         </CardContent>
       </Card>
 
+      {/* Entities panel (your existing API: no open/close) */}
+      <EntitiesPanel
+        entities={entities}
+        setEntities={setEntities}
+        activeEntityId={safeEntityId}
+        setActiveEntityId={(id: string) => {
+          setActiveEntityId(id);
+          setState((s) => ({ ...s, entityId: id }));
+        }}
+      />
+
       <AccountsPanel accounts={accounts} setAccounts={setAccounts} />
+
       <EntryPreview accounts={accounts} entries={entries} onChangeEntries={setEntries} />
+
+      {/* Consolidation preview wired with correct props */}
+      <ConsolidationPreview entities={entities} accountsByEntity={accountsByEntity} entries={entries} />
     </>
   );
 }
