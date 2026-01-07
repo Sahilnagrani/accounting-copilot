@@ -46,6 +46,20 @@ const MONTHS: Record<string, number> = {
   dec: 11, december: 11,
 };
 
+export function monthStartISO(yyyyMm: string) {
+  return `${yyyyMm}-01`;
+}
+
+export function monthEndISO(yyyyMm: string) {
+  const [y, m] = yyyyMm.split("-").map(Number);
+  const d = new Date(y, m, 0); // last day of month
+  return toISODate(d);
+}
+
+export function isoInMonth(iso: string, yyyyMm: string) {
+  return iso >= monthStartISO(yyyyMm) && iso <= monthEndISO(yyyyMm);
+}
+
 function parseAnyDate(text: string): string | undefined {
   const t = stripOrdinal(text.toLowerCase());
 
@@ -172,13 +186,15 @@ function parseCounterparty(text: string, action?: ActionKind): string | undefine
 
 function parseItem(text: string, action?: ActionKind): string | undefined {
   if (action !== "buy" && action !== "sell") return undefined;
-  const m = text.match(/\b(buy|bought|purchase|purchased|sell|sold)\b\s+(.+?)\s+\bfor\b/i);
+  const m = text.match(
+    /\b(buy|bought|purchase|purchased|sell|sold)\b\s+(.+?)\s+\bfor\b/i
+  );
   if (m?.[2]) return m[2].trim();
   return undefined;
 }
 
 // Candidate expense/category from natural language.
-// STRICT: we only post to it if it exists in allowed accounts map.
+// STRICTLY allow-list later (in generateEntryFromEvent).
 function parseExpenseAccount(text: string): string | undefined {
   const onMatch = text.match(/\bon\s+([^,.;\n]+)$/i);
   if (onMatch?.[1]) return onMatch[1].trim();
@@ -213,7 +229,10 @@ function normalizeAccountKey(s: string) {
   return s.trim().toLowerCase();
 }
 
-function pickAllowedAccountName(candidate: string | undefined, allowedNameMap: Map<string, string> | null): string | null {
+function pickAllowedAccountName(
+  candidate: string | undefined,
+  allowedNameMap: Map<string, string> | null
+): string | null {
   if (!candidate || !allowedNameMap) return null;
   const key = normalizeAccountKey(candidate);
   return allowedNameMap.get(key) ?? null;
@@ -260,6 +279,7 @@ function generateEntryFromEvent(
     case "buy": {
       const creditAccount = defaults.useARAP ? "Accounts Payable" : "Cash";
 
+      // STRICT: only use a category account if it exists in the chart
       const allowedDebit =
         pickAllowedAccountName(ev.expenseAccount, allowedAccountNameMap) ?? "Purchases / Expense";
 
@@ -277,6 +297,8 @@ function generateEntryFromEvent(
     }
     case "spend": {
       const creditAccount = defaults.useARAP ? "Accounts Payable" : "Cash";
+
+      // STRICT: only use a category account if it exists in the chart
       const allowedDebit =
         pickAllowedAccountName(ev.expenseAccount, allowedAccountNameMap) ?? "Purchases / Expense";
 
@@ -297,6 +319,7 @@ function generateEntryFromEvent(
     currency,
     entityId: stamp.entityId,
     businessUnitId: stamp.businessUnitId,
+    source: "saved",
     lines,
   };
 }
@@ -360,11 +383,8 @@ export function extractEventsWithContext(text: string): ParsedEvent[] {
 }
 
 /**
- * If allowedAccounts is provided, buy/spend will ONLY post to category accounts
- * that exist in allowedAccounts; otherwise it falls back to "Purchases / Expense".
- *
- * NEW:
- * - opts.entityId / opts.businessUnitId: stamps entries for multi-entity ledger
+ * If provided, buy/spend will ONLY post to category accounts that exist in allowedAccounts.
+ * Otherwise fallback to "Purchases / Expense".
  */
 export function generateEntriesFromText(
   text: string,
@@ -423,9 +443,9 @@ export function isBalancedEntry(entry: JournalEntry): boolean {
 }
 
 /**
- * Balance convention:
- * + => net debit balance
- * - => net credit balance
+ * Balances are stored as signed:
+ *   + => net debit
+ *   - => net credit
  */
 export function computeBalances(
   accounts: Account[],
@@ -454,6 +474,15 @@ export function computeBalances(
   }
 
   return { opening, closing };
+}
+
+export function computeBalancesAsOf(
+  accounts: Account[],
+  allEntries: JournalEntry[],
+  throughISO: string
+) {
+  const entries = allEntries.filter((e) => e.dateISO <= throughISO);
+  return computeBalances(accounts, entries);
 }
 
 export function formatBalance(n: number): { side: "Dr" | "Cr"; amount: number } {

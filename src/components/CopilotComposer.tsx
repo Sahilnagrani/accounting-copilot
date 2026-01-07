@@ -1,61 +1,43 @@
-// src/components/CopilotComposer.tsx
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { Account, ActionKind, ComposerState, Currency, Entity, JournalEntry } from "@/lib/types";
+import React, { useMemo, useState, useEffect } from "react";
+import type { Account, ComposerState, JournalEntry, JournalLine, Entity, Asset, Loan, Currency } from "@/lib/types";
+import { generateEntriesFromText, isoInMonth, monthEndISO, computeBalancesAsOf, formatBalance } from "@/lib/journalEngine";
+import { generateScheduledEntriesForPeriod } from "@/lib/schedulesEngine";
 import { Card, CardContent, CardHeader } from "./ui/Card";
 
-import EntitiesPanel from "./EntitiesPanel";
-import AccountsPanel from "./AccountsPanel";
-import EntryPreview from "./EntryPreview";
-import ConsolidationPreview from "./ConsolidationPreview";
-import SavedLedgerPanel from "./SavedLedgerPanel";
-import BalanceSheetPanel from "./BalanceSheetPanel";
-
-import { generateEntriesFromText, computeBalances, formatBalance } from "@/lib/journalEngine";
-import {
-  generateScheduledEntriesForPeriod,
-  type AssetSchedule,
-  type LiabilitySchedule,
-} from "@/lib/schedulesEngine";
-
-/** -----------------------
- * LocalStorage keys
- * ---------------------- */
-const LS = {
-  entities: "ac.entities.v1",
-  accountsByEntity: "ac.accountsByEntity.v1",
-  journalEntries: "ac.journalEntries.v1",
-  activeEntityId: "ac.activeEntityId.v1",
-  composerState: "ac.composerState.v1",
-
-  // NEW: schedules storage (simple MVP)
-  assetSchedules: "ac.schedules.assets.v1", // AssetSchedule[]
-  liabilitySchedules: "ac.schedules.liabilities.v1", // LiabilitySchedule[]
-  selectedPeriod: "ac.selectedPeriod.v1", // YYYY-MM
-};
-
-function safeJSONParse<T>(s: string | null): T | null {
-  if (!s) return null;
-  try {
-    return JSON.parse(s) as T;
-  } catch {
-    return null;
-  }
-}
-
+// If you already have these components, keep them.
+// This file does NOT require them anymore to function.
 function makeId() {
   return Math.random().toString(16).slice(2) + "-" + Date.now().toString(16);
 }
 
-const currencies: Currency[] = ["AED", "USD", "EUR"];
+const DEFAULT_ENTITY_ID = "entity-default";
 
-function yyyyMMNow() {
+function currentYYYYMM(): string {
   const d = new Date();
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   return `${yyyy}-${mm}`;
 }
+
+const defaultAccounts: Account[] = [
+  { id: makeId(), name: "Cash", normalSide: "debit", openingBalance: 0 },
+  { id: makeId(), name: "Accounts Receivable", normalSide: "debit", openingBalance: 0 },
+  { id: makeId(), name: "Accounts Payable", normalSide: "credit", openingBalance: 0 },
+  { id: makeId(), name: "Loan Receivable", normalSide: "debit", openingBalance: 0 },
+  { id: makeId(), name: "Loan Payable", normalSide: "credit", openingBalance: 0 },
+  { id: makeId(), name: "Revenue", normalSide: "credit", openingBalance: 0 },
+  { id: makeId(), name: "Purchases / Expense", normalSide: "debit", openingBalance: 0 },
+  { id: makeId(), name: "Input VAT", normalSide: "debit", openingBalance: 0 },
+  { id: makeId(), name: "Output VAT", normalSide: "credit", openingBalance: 0 },
+
+  // schedule defaults
+  { id: makeId(), name: "Equipment", normalSide: "debit", openingBalance: 0 },
+  { id: makeId(), name: "Accumulated Depreciation", normalSide: "credit", openingBalance: 0 },
+  { id: makeId(), name: "Depreciation Expense", normalSide: "debit", openingBalance: 0 },
+  { id: makeId(), name: "Interest Expense", normalSide: "debit", openingBalance: 0 },
+];
 
 function defaultEntity(name: string): Entity {
   return {
@@ -78,95 +60,45 @@ function defaultEntity(name: string): Entity {
   };
 }
 
-function defaultChart(): Account[] {
-  return [
-    { id: makeId(), name: "Cash", normalSide: "debit", openingBalance: 0 },
-    { id: makeId(), name: "Accounts Receivable", normalSide: "debit", openingBalance: 0 },
-    { id: makeId(), name: "Accounts Payable", normalSide: "credit", openingBalance: 0 },
-    { id: makeId(), name: "Loan Receivable", normalSide: "debit", openingBalance: 0 },
-    { id: makeId(), name: "Loan Payable", normalSide: "credit", openingBalance: 0 },
-    { id: makeId(), name: "Revenue", normalSide: "credit", openingBalance: 0 },
-    { id: makeId(), name: "Purchases / Expense", normalSide: "debit", openingBalance: 0 },
-    { id: makeId(), name: "Input VAT", normalSide: "debit", openingBalance: 0 },
-    { id: makeId(), name: "Output VAT", normalSide: "credit", openingBalance: 0 },
-
-    // Schedules defaults (so balances look nice immediately)
-    { id: makeId(), name: "Depreciation Expense", normalSide: "debit", openingBalance: 0 },
-    { id: makeId(), name: "Accumulated Depreciation", normalSide: "credit", openingBalance: 0 },
-    { id: makeId(), name: "Interest Expense", normalSide: "debit", openingBalance: 0 },
-
-    // Intercompany defaults
-    { id: makeId(), name: "Intercompany Receivable", normalSide: "debit", openingBalance: 0 },
-    { id: makeId(), name: "Intercompany Payable", normalSide: "credit", openingBalance: 0 },
-    { id: makeId(), name: "Intercompany Loan Receivable", normalSide: "debit", openingBalance: 0 },
-    { id: makeId(), name: "Intercompany Loan Payable", normalSide: "credit", openingBalance: 0 },
-  ];
-}
-
-/** -----------------------
- * Quick Actions (simple)
- * ---------------------- */
-function QuickActions({
-  visible,
-  onPick,
-}: {
-  visible: boolean;
-  onPick: (k: ActionKind) => void;
-}) {
-  if (!visible) return null;
-
-  const items: { k: ActionKind; label: string; hint: string }[] = [
-    { k: "spend", label: "Spend", hint: "spent 120 aed on office supplies" },
-    { k: "buy", label: "Buy", hint: "bought printer for 600 aed" },
-    { k: "sell", label: "Sell", hint: "sold consulting for 2000 aed" },
-    { k: "lend", label: "Lend", hint: "lent 500 aed to friend" },
-    { k: "borrow", label: "Borrow", hint: "borrowed 10000 aed from bank" },
-  ];
-
-  return (
-    <div className="mt-3 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-3">
-      <div className="text-xs text-zinc-400">Quick actions</div>
-      <div className="mt-2 flex flex-wrap gap-2">
-        {items.map((x) => (
-          <button
-            key={x.k}
-            onClick={() => onPick(x.k)}
-            className="group rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-left text-xs text-zinc-200 hover:border-zinc-700"
-            title={x.hint}
-          >
-            <div className="text-zinc-100">{x.label}</div>
-            <div className="mt-0.5 text-[11px] text-zinc-500 group-hover:text-zinc-400">{x.hint}</div>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function money(n: number) {
   return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function BalanceMini({
-  title,
-  balances,
+function TabButton({
+  active,
+  children,
+  onClick,
 }: {
-  title: string;
-  balances: Record<string, number>;
+  active: boolean;
+  children: React.ReactNode;
+  onClick: () => void;
 }) {
-  const rows = Object.entries(balances)
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .slice(0, 8);
-
   return (
-    <div className="rounded-2xl border border-zinc-800 overflow-hidden">
+    <button
+      onClick={onClick}
+      className={[
+        "rounded-xl border px-3 py-2 text-xs",
+        active
+          ? "border-emerald-700 bg-emerald-900/25 text-emerald-200"
+          : "border-zinc-800 bg-zinc-950/40 text-zinc-200 hover:border-zinc-700",
+      ].join(" ")}
+    >
+      {children}
+    </button>
+  );
+}
+
+function BalanceGrid({ title, balances }: { title: string; balances: Record<string, number> }) {
+  const rows = Object.entries(balances).sort((a, b) => a[0].localeCompare(b[0]));
+  return (
+    <div className="overflow-hidden rounded-2xl border border-zinc-800">
       <div className="bg-zinc-950/40 px-4 py-3 text-sm font-medium text-zinc-100">{title}</div>
       <div className="grid grid-cols-12 bg-zinc-950/20 px-4 py-2 text-xs text-zinc-400">
         <div className="col-span-7">Account</div>
         <div className="col-span-5 text-right">Balance</div>
       </div>
       {rows.length === 0 ? (
-        <div className="border-t border-zinc-800 px-4 py-3 text-sm text-zinc-500">No balances.</div>
+        <div className="border-t border-zinc-800 px-4 py-3 text-sm text-zinc-400">No balances.</div>
       ) : (
         rows.map(([name, bal]) => {
           const f = formatBalance(bal);
@@ -180,234 +112,278 @@ function BalanceMini({
           );
         })
       )}
-      <div className="border-t border-zinc-800 px-4 py-2 text-xs text-zinc-500">Showing top 8</div>
     </div>
   );
 }
 
+// -------------------------
+// localStorage persistence
+// -------------------------
+const LS_KEY = "acctcopilot:v1";
+
+type Persisted = {
+  entities: Entity[];
+  accountsByEntity: Record<string, Account[]>;
+  savedEntries: JournalEntry[];
+  assets: Asset[];
+  loans: Loan[];
+};
+
+function safeParse<T>(s: string | null): T | null {
+  if (!s) return null;
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    return null;
+  }
+}
+
 export default function CopilotComposer() {
-  /** -----------------------
-   * Core state
-   * ---------------------- */
-  const [entities, setEntities] = useState<Entity[]>(() => {
-    const saved = safeJSONParse<Entity[]>(typeof window !== "undefined" ? localStorage.getItem(LS.entities) : null);
-    if (saved && saved.length) return saved;
-    return [defaultEntity("Main Entity")];
+  // ------------ state ------------
+  const [tab, setTab] = useState<"compose" | "saved" | "schedules" | "impact">("compose");
+
+  const [entities, setEntities] = useState<Entity[]>(() => [defaultEntity("Main Entity")]);
+  const [activeEntityId, setActiveEntityId] = useState<string>(() => entities[0]?.id ?? DEFAULT_ENTITY_ID);
+
+  const [accountsByEntity, setAccountsByEntity] = useState<Record<string, Account[]>>(() => ({
+    [DEFAULT_ENTITY_ID]: defaultAccounts,
+  }));
+
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [loans, setLoans] = useState<Loan[]>([]);
+  const [savedEntries, setSavedEntries] = useState<JournalEntry[]>([]);
+
+  const [state, setState] = useState<ComposerState>({
+    text: "",
+    currency: "AED",
+    vatEnabled: true,
+    vatRate: 0.05,
+    vatInclusive: true,
+    useARAP: false,
+    entityId: DEFAULT_ENTITY_ID,
+    businessUnitId: undefined,
+    periodMonth: currentYYYYMM(),
   });
 
-  const [activeEntityId, setActiveEntityId] = useState<string>(() => {
-    const saved = typeof window !== "undefined" ? localStorage.getItem(LS.activeEntityId) : null;
-    return saved ?? "";
-  });
-
-  const [accountsByEntity, setAccountsByEntity] = useState<Record<string, Account[]>>(() => {
-    const saved = safeJSONParse<Record<string, Account[]>>(
-      typeof window !== "undefined" ? localStorage.getItem(LS.accountsByEntity) : null
-    );
-    return saved ?? {};
-  });
-
-  const [journalEntries, setJournalEntries] = useState<JournalEntry[]>(() => {
-    const saved = safeJSONParse<JournalEntry[]>(
-      typeof window !== "undefined" ? localStorage.getItem(LS.journalEntries) : null
-    );
-    return saved ?? [];
-  });
-
-  // NEW: schedules (MVP storage)
-  const [assetSchedules, setAssetSchedules] = useState<AssetSchedule[]>(() => {
-    const saved = safeJSONParse<AssetSchedule[]>(
-      typeof window !== "undefined" ? localStorage.getItem(LS.assetSchedules) : null
-    );
-    return saved ?? [];
-  });
-
-  const [liabilitySchedules, setLiabilitySchedules] = useState<LiabilitySchedule[]>(() => {
-    const saved = safeJSONParse<LiabilitySchedule[]>(
-      typeof window !== "undefined" ? localStorage.getItem(LS.liabilitySchedules) : null
-    );
-    return saved ?? [];
-  });
-
-  // NEW: selected month filter
-  const [selectedPeriod, setSelectedPeriod] = useState<string>(() => {
-    const saved = typeof window !== "undefined" ? localStorage.getItem(LS.selectedPeriod) : null;
-    return saved ?? yyyyMMNow();
-  });
-
-  const [state, setState] = useState<ComposerState>(() => {
-    const saved = safeJSONParse<ComposerState>(
-      typeof window !== "undefined" ? localStorage.getItem(LS.composerState) : null
-    );
-    return (
-      saved ?? {
-        text: "",
-        currency: "AED",
-        vatEnabled: true,
-        vatRate: 0.05,
-        vatInclusive: false,
-        useARAP: false,
-        entityId: "",
-        businessUnitId: undefined,
-      }
-    );
-  });
-
-  const [tab, setTab] = useState<"copilot" | "entities" | "consolidation" | "ledger" | "balanceSheet">(
-    "copilot"
-  );
-
-  const [generatedEntries, setGeneratedEntries] = useState<JournalEntry[]>([]);
-  const [lastEventsCount, setLastEventsCount] = useState(0);
-
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-
-  /** -----------------------
-   * Ensure active entity
-   * ---------------------- */
+  // restore persisted
   useEffect(() => {
-    if (!entities.length) return;
+    const loaded = safeParse<Persisted>(localStorage.getItem(LS_KEY));
+    if (!loaded) return;
 
-    if (!activeEntityId) {
-      setActiveEntityId(entities[0].id);
-      setState((s) => ({ ...s, entityId: entities[0].id }));
-      return;
-    }
+    setEntities(loaded.entities?.length ? loaded.entities : [defaultEntity("Main Entity")]);
+    setAccountsByEntity(loaded.accountsByEntity && Object.keys(loaded.accountsByEntity).length ? loaded.accountsByEntity : { [DEFAULT_ENTITY_ID]: defaultAccounts });
+    setSavedEntries(Array.isArray(loaded.savedEntries) ? loaded.savedEntries : []);
+    setAssets(Array.isArray(loaded.assets) ? loaded.assets : []);
+    setLoans(Array.isArray(loaded.loans) ? loaded.loans : []);
+  }, []);
 
-    const stillExists = entities.some((e) => e.id === activeEntityId);
-    if (!stillExists) {
-      const fallback = entities[0].id;
-      setActiveEntityId(fallback);
-      setState((s) => ({ ...s, entityId: fallback }));
-    }
-  }, [entities, activeEntityId]);
-
-  /** -----------------------
-   * Ensure chart exists per entity
-   * ---------------------- */
+  // persist
   useEffect(() => {
-    if (!entities.length) return;
+    const payload: Persisted = {
+      entities,
+      accountsByEntity,
+      savedEntries,
+      assets,
+      loans,
+    };
+    localStorage.setItem(LS_KEY, JSON.stringify(payload));
+  }, [entities, accountsByEntity, savedEntries, assets, loans]);
 
-    setAccountsByEntity((prev) => {
-      let changed = false;
-      const next = { ...prev };
-
-      for (const e of entities) {
-        if (!next[e.id] || next[e.id].length === 0) {
-          next[e.id] = defaultChart();
-          changed = true;
-        }
-      }
-
-      for (const k of Object.keys(next)) {
-        if (!entities.some((e) => e.id === k)) {
-          delete next[k];
-          changed = true;
-        }
-      }
-
-      return changed ? next : prev;
-    });
-  }, [entities]);
-
-  /** -----------------------
-   * Persist
-   * ---------------------- */
-  useEffect(() => localStorage.setItem(LS.entities, JSON.stringify(entities)), [entities]);
+  // keep state.entityId consistent with activeEntityId without illegal effect loops
   useEffect(() => {
-    if (activeEntityId) localStorage.setItem(LS.activeEntityId, activeEntityId);
+    setState((s) => ({ ...s, entityId: activeEntityId }));
   }, [activeEntityId]);
-  useEffect(() => localStorage.setItem(LS.accountsByEntity, JSON.stringify(accountsByEntity)), [accountsByEntity]);
-  useEffect(() => localStorage.setItem(LS.journalEntries, JSON.stringify(journalEntries)), [journalEntries]);
-  useEffect(() => localStorage.setItem(LS.composerState, JSON.stringify(state)), [state]);
 
-  // NEW: persist schedules + period
-  useEffect(() => localStorage.setItem(LS.assetSchedules, JSON.stringify(assetSchedules)), [assetSchedules]);
-  useEffect(() => localStorage.setItem(LS.liabilitySchedules, JSON.stringify(liabilitySchedules)), [liabilitySchedules]);
-  useEffect(() => localStorage.setItem(LS.selectedPeriod, selectedPeriod), [selectedPeriod]);
+  const activeEntity = useMemo(() => entities.find((e) => e.id === activeEntityId) ?? null, [entities, activeEntityId]);
 
-  /** -----------------------
-   * Derived
-   * ---------------------- */
-  const activeEntity = useMemo(
-    () => entities.find((e) => e.id === activeEntityId) ?? null,
-    [entities, activeEntityId]
-  );
-
-  const activeAccounts = useMemo(
-    () => accountsByEntity[activeEntityId] ?? [],
+  const activeAccounts = useMemo<Account[]>(
+    () => accountsByEntity[activeEntityId] ?? accountsByEntity[DEFAULT_ENTITY_ID] ?? defaultAccounts,
     [accountsByEntity, activeEntityId]
   );
 
-  const allowedAccountNames = useMemo(() => activeAccounts.map((a) => a.name), [activeAccounts]);
-
-  const savedForActiveEntity = useMemo(
-    () => journalEntries.filter((e) => e.entityId === activeEntityId),
-    [journalEntries, activeEntityId]
-  );
-
-  // ✅ NEW: Scheduled entries for selectedPeriod, auto-added to impact tabs
-  const scheduledForPeriod = useMemo(() => {
-    return generateScheduledEntriesForPeriod({
-      period: selectedPeriod,
-      entityId: activeEntityId,
-      savedEntries: journalEntries, // dedupe against all saved
-      schedules: { assets: assetSchedules, liabilities: liabilitySchedules },
-    });
-  }, [selectedPeriod, activeEntityId, journalEntries, assetSchedules, liabilitySchedules]);
-
-  // ✅ NEW: month-filtered entries including schedules (no double count)
-  const effectiveEntriesForPeriod = useMemo(() => {
-    const savedInPeriod = savedForActiveEntity.filter((e) => (e.dateISO ?? "").startsWith(selectedPeriod));
-    // scheduledForPeriod is already deduped vs saved using markers
-    return [...savedInPeriod, ...scheduledForPeriod];
-  }, [savedForActiveEntity, scheduledForPeriod, selectedPeriod]);
-
-  // ✅ NEW: impact uses selected month + schedules
-  const impactForPeriod = useMemo(() => {
-    const { opening, closing } = computeBalances(activeAccounts, effectiveEntriesForPeriod);
-    return { opening, closing };
-  }, [activeAccounts, effectiveEntriesForPeriod]);
-
-  /** -----------------------
-   * Helpers: satisfy TS for AccountsPanel
-   * ---------------------- */
-  const setAccountsForActiveEntity: React.Dispatch<React.SetStateAction<Account[]>> = (value) => {
+  // Fix TS error: provide a real Dispatch<SetStateAction<Account[]>>
+  const setActiveAccounts: React.Dispatch<React.SetStateAction<Account[]>> = (value) => {
     setAccountsByEntity((prev) => {
       const current = prev[activeEntityId] ?? [];
-      const nextAccounts = typeof value === "function" ? value(current) : value;
-      return { ...prev, [activeEntityId]: nextAccounts };
+      const next = typeof value === "function" ? (value as (p: Account[]) => Account[])(current) : value;
+      return { ...prev, [activeEntityId]: next };
     });
   };
 
-  /** -----------------------
-   * Actions
-   * ---------------------- */
-  function applyActionTemplate(k: ActionKind) {
-    const templates: Record<ActionKind, string> = {
-      spend: "spent 120 aed on office supplies",
-      buy: "bought a laptop for 3500 aed",
-      sell: "sold consulting for 2000 aed",
-      lend: "lent 500 aed to friend",
-      borrow: "borrowed 10000 aed from bank",
-    };
+  // ------------ scheduled + month filtering ------------
+  const periodMonth = state.periodMonth;
 
-    const t = templates[k];
-    setState((s) => ({ ...s, text: s.text.trim() ? `${s.text.trim()}\n${t}` : t }));
-    setTab("copilot");
-    requestAnimationFrame(() => textareaRef.current?.focus());
+  const scheduledEntriesForMonth = useMemo(() => {
+    return generateScheduledEntriesForPeriod({
+      periodMonth,
+      currency: state.currency,
+      assets,
+      loans,
+    });
+  }, [periodMonth, state.currency, assets, loans]);
+
+  const savedEntriesForMonth = useMemo(() => {
+    return savedEntries.filter((e) => isoInMonth(e.dateISO, periodMonth));
+  }, [savedEntries, periodMonth]);
+
+  // avoid double-counting: scheduled IDs are "sched-*"
+  const monthEntriesAll = useMemo(() => {
+    const scheduled = scheduledEntriesForMonth.filter((x) => x.source === "scheduled");
+    const saved = savedEntriesForMonth.map((x) => ({ ...x, source: "saved" as const }));
+    return [...saved, ...scheduled].sort((a, b) => a.dateISO.localeCompare(b.dateISO));
+  }, [savedEntriesForMonth, scheduledEntriesForMonth]);
+
+  // compute balances impact as-of end of selected month
+  const impact = useMemo(() => {
+    const through = monthEndISO(periodMonth);
+    const entityEntries = monthEntriesAll.filter((e) => e.entityId === activeEntityId);
+    const asOf = computeBalancesAsOf(activeAccounts, entityEntries, through);
+    return asOf.closing;
+  }, [monthEntriesAll, activeEntityId, activeAccounts, periodMonth]);
+
+  const needsVATControls = useMemo(() => {
+    return /\b(buy|bought|purchase|purchased|sell|sold)\b/i.test(state.text);
+  }, [state.text]);
+
+  // ------------ generate from text ------------
+  const [previewEntries, setPreviewEntries] = useState<JournalEntry[]>([]);
+  const [eventsCount, setEventsCount] = useState(0);
+  const [unresolvedAccounts, setUnresolvedAccounts] = useState<string[]>([]);
+  const [resolvedHints, setResolvedHints] = useState<Record<string, string>>({});
+
+  // strict allow-list of account names
+  function normalizeName(s: string) {
+    return s
+      .toLowerCase()
+      .replace(/&/g, "and")
+      .replace(/[^a-z0-9\s/]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function canonicalizeExact(entries: JournalEntry[], accounts: Account[]) {
+    const nameMap = new Map<string, string>();
+    for (const a of accounts) nameMap.set(normalizeName(a.name), a.name);
+
+    return entries.map((e) => ({
+      ...e,
+      lines: e.lines.map((ln) => {
+        const canon = nameMap.get(normalizeName(ln.account));
+        return canon ? { ...ln, account: canon } : ln;
+      }),
+    }));
+  }
+
+  function tokens(s: string): string[] {
+    const t = normalizeName(s);
+    return t
+      .split(/[\s/]+/g)
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .filter((x) => !["a", "an", "the", "of", "for", "to", "and", "in", "on"].includes(x));
+  }
+
+  function levenshtein(a: string, b: string) {
+    const aa = a;
+    const bb = b;
+    const m = aa.length;
+    const n = bb.length;
+    if (m === 0) return n;
+    if (n === 0) return m;
+
+    const dp: number[] = new Array(n + 1);
+    for (let j = 0; j <= n; j++) dp[j] = j;
+
+    for (let i = 1; i <= m; i++) {
+      let prev = dp[0];
+      dp[0] = i;
+      for (let j = 1; j <= n; j++) {
+        const tmp = dp[j];
+        const cost = aa[i - 1] === bb[j - 1] ? 0 : 1;
+        dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + cost);
+        prev = tmp;
+      }
+    }
+    return dp[n];
+  }
+
+  function similarity(a: string, b: string) {
+    const na = normalizeName(a);
+    const nb = normalizeName(b);
+    if (!na || !nb) return 0;
+    if (na === nb) return 1;
+    if (na.includes(nb) || nb.includes(na)) return 0.92;
+
+    const ta = new Set(tokens(na));
+    const tb = new Set(tokens(nb));
+    let inter = 0;
+    for (const x of ta) if (tb.has(x)) inter++;
+    const union = ta.size + tb.size - inter;
+    const jaccard = union === 0 ? 0 : inter / union;
+
+    const dist = levenshtein(na, nb);
+    const editSim = 1 - dist / Math.max(na.length, nb.length);
+
+    return Math.max(jaccard * 0.75 + editSim * 0.25, editSim * 0.85);
+  }
+
+  function resolveClosestAccounts(params: {
+    entries: JournalEntry[];
+    accounts: Account[];
+    minScore?: number;
+  }): { entries: JournalEntry[]; unresolved: string[]; resolvedMap: Record<string, string> } {
+    const { entries, accounts } = params;
+    const minScore = params.minScore ?? 0.72;
+
+    const byNorm = new Map<string, string>();
+    for (const a of accounts) byNorm.set(normalizeName(a.name), a.name);
+
+    const unresolvedSet = new Set<string>();
+    const resolvedMap: Record<string, string> = {};
+
+    const out = entries.map((e) => {
+      const newLines: JournalLine[] = e.lines.map((ln) => {
+        const rawName = ln.account.trim();
+        const norm = normalizeName(rawName);
+
+        const exact = byNorm.get(norm);
+        if (exact) return { ...ln, account: exact };
+
+        let bestName: string | null = null;
+        let bestScore = 0;
+
+        for (const a of accounts) {
+          const sc = similarity(rawName, a.name);
+          if (sc > bestScore) {
+            bestScore = sc;
+            bestName = a.name;
+          }
+        }
+
+        if (bestName && bestScore >= minScore) {
+          resolvedMap[rawName] = bestName;
+          return { ...ln, account: bestName };
+        }
+
+        unresolvedSet.add(rawName);
+        return ln;
+      });
+
+      return { ...e, lines: newLines };
+    });
+
+    return {
+      entries: out,
+      unresolved: Array.from(unresolvedSet).sort((a, b) => a.localeCompare(b)),
+      resolvedMap,
+    };
   }
 
   function generatePreview() {
-    const text = state.text.trim();
-    if (!text) {
-      setGeneratedEntries([]);
-      setLastEventsCount(0);
-      return;
-    }
+    const allowedAccounts = activeAccounts.map((a) => a.name);
 
-    const { events, entries } = generateEntriesFromText(
-      text,
+    const res = generateEntriesFromText(
+      state.text,
       {
         currency: state.currency,
         vatEnabled: state.vatEnabled,
@@ -415,308 +391,815 @@ export default function CopilotComposer() {
         vatInclusive: state.vatInclusive,
         useARAP: state.useARAP,
       },
-      { allowedAccounts: allowedAccountNames }
+      {
+        allowedAccounts,
+        entityId: state.entityId,
+        businessUnitId: state.businessUnitId,
+      }
     );
 
-    const patched = entries.map((e) => ({
-      ...e,
+    setEventsCount(res.events.length);
+
+    const exact = canonicalizeExact(res.entries, activeAccounts);
+    const resolved = resolveClosestAccounts({ entries: exact, accounts: activeAccounts, minScore: 0.72 });
+
+    setPreviewEntries(resolved.entries);
+    setUnresolvedAccounts(resolved.unresolved);
+    setResolvedHints(resolved.resolvedMap);
+  }
+
+  function savePreviewEntries() {
+    if (!previewEntries.length) return;
+    const stamped = previewEntries.map((e) => ({ ...e, source: "saved" as const }));
+    setSavedEntries((prev) => [...stamped, ...prev]);
+    setPreviewEntries([]);
+    setState((s) => ({ ...s, text: "" }));
+    setTab("saved");
+  }
+
+  // ------------ schedules CRUD ------------
+  function ensureAccountExists(name: string) {
+    const exists = activeAccounts.some((a) => a.name === name);
+    if (exists) return;
+    setActiveAccounts((prev) => [...prev, { id: makeId(), name, normalSide: "debit", openingBalance: 0 }]);
+  }
+
+  function addAsset() {
+    // ensure typical accounts exist (per entity chart)
+    ensureAccountExists("Equipment");
+    ensureAccountExists("Accumulated Depreciation");
+    ensureAccountExists("Depreciation Expense");
+
+    const a: Asset = {
+      id: makeId(),
       entityId: activeEntityId,
       businessUnitId: state.businessUnitId,
-    }));
-
-    setGeneratedEntries(patched);
-    setLastEventsCount(events.length);
+      name: `Asset ${assets.length + 1}`,
+      acquisitionDateISO: `${state.periodMonth}-01`,
+      cost: 0,
+      assetAccount: "Equipment",
+      accumulatedDepAccount: "Accumulated Depreciation",
+      depreciationExpenseAccount: "Depreciation Expense",
+      method: "straight_line_monthly",
+      usefulLifeMonths: 36,
+    };
+    setAssets((prev) => [a, ...prev]);
+    setTab("schedules");
   }
 
-  function saveGeneratedToLedger() {
-    if (!generatedEntries.length) return;
-    setJournalEntries((prev) => [...prev, ...generatedEntries]);
-    setGeneratedEntries([]);
-    setState((s) => ({ ...s, text: "" }));
+  function addLoan() {
+    ensureAccountExists("Loan Payable");
+    ensureAccountExists("Interest Expense");
+    ensureAccountExists("Cash");
+
+    const l: Loan = {
+      id: makeId(),
+      entityId: activeEntityId,
+      businessUnitId: state.businessUnitId,
+      name: `Loan ${loans.length + 1}`,
+      startDateISO: `${state.periodMonth}-01`,
+      principal: 0,
+      annualInterestRate: 0.12,
+      termMonths: 12,
+      loanPayableAccount: "Loan Payable",
+      interestExpenseAccount: "Interest Expense",
+      cashAccount: "Cash",
+    };
+    setLoans((prev) => [l, ...prev]);
+    setTab("schedules");
   }
 
-  /** -----------------------
-   * UI
-   * ---------------------- */
+  function capitalizeAssetToJournal(asset: Asset) {
+    // creates a SAVED entry for acquisition (Dr Asset / Cr Cash)
+    const e: JournalEntry = {
+      id: makeId(),
+      dateISO: asset.acquisitionDateISO,
+      memo: `Capitalize Asset - ${asset.name}`,
+      currency: state.currency,
+      entityId: asset.entityId,
+      businessUnitId: asset.businessUnitId,
+      source: "saved",
+      lines: [
+        { account: asset.assetAccount, debit: asset.cost || 0, credit: 0 },
+        { account: "Cash", debit: 0, credit: asset.cost || 0 },
+      ],
+    };
+    setSavedEntries((prev) => [e, ...prev]);
+    setTab("saved");
+  }
+
+  // ------------ UI helpers ------------
+  const entityBusinessUnits = activeEntity?.businessUnits ?? [];
+
+  const entityAccountsCount = activeAccounts.length;
+
   return (
-    <div className="space-y-6">
-      {/* Top nav */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap gap-2">
-          {(
-            [
-              ["copilot", "Copilot"],
-              ["entities", "Entities"],
-              ["balanceSheet", "Balance Sheet"],
-              ["consolidation", "Consolidation"],
-              ["ledger", "Ledger"],
-            ] as const
-          ).map(([k, label]) => (
-            <button
-              key={k}
-              onClick={() => setTab(k)}
-              className={[
-                "rounded-xl border px-3 py-2 text-xs",
-                tab === k
-                  ? "border-emerald-700 bg-emerald-900/25 text-emerald-200"
-                  : "border-zinc-800 bg-zinc-950/40 text-zinc-200 hover:border-zinc-700",
-              ].join(" ")}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+    <>
+      {/* Top controls */}
+      <Card>
+        <CardHeader
+          title="Accounting Copilot"
+          subtitle="Compose entries, save them, and auto-generate depreciation + loan schedules into Impact."
+        />
+        <CardContent>
+          <div className="flex flex-col gap-4">
+            {/* entity + period */}
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4">
+                <div className="text-xs text-zinc-400">Entity</div>
+                <select
+                  value={activeEntityId}
+                  onChange={(e) => setActiveEntityId(e.target.value)}
+                  className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                >
+                  {entities.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.name}
+                    </option>
+                  ))}
+                </select>
+                <div className="mt-2 text-xs text-zinc-500">Accounts: {entityAccountsCount}</div>
+              </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-zinc-500">Active:</span>
-          <select
-            value={activeEntityId}
-            onChange={(e) => {
-              const id = e.target.value;
-              setActiveEntityId(id);
-              setState((s) => ({ ...s, entityId: id, businessUnitId: undefined }));
-            }}
-            className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-zinc-700"
-          >
-            {entities.map((e) => (
-              <option key={e.id} value={e.id}>
-                {e.name}
-              </option>
-            ))}
-          </select>
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4">
+                <div className="text-xs text-zinc-400">Business Unit</div>
+                <select
+                  value={state.businessUnitId ?? ""}
+                  onChange={(e) => setState((s) => ({ ...s, businessUnitId: e.target.value || undefined }))}
+                  className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                >
+                  <option value="">(All / none)</option>
+                  {entityBusinessUnits.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
+                <div className="mt-2 text-xs text-zinc-500">Entries will be stamped with this BU.</div>
+              </div>
 
-          <span className="ml-2 text-xs text-zinc-500">Month:</span>
-          <input
-            type="month"
-            value={selectedPeriod}
-            onChange={(e) => setSelectedPeriod(e.target.value)}
-            className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-zinc-700"
-          />
-        </div>
-      </div>
-
-      {/* Period impact summary (includes schedules automatically) */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-12">
-        <div className="md:col-span-7">
-          <BalanceMini title={`Impact (saved + schedules) • ${selectedPeriod}`} balances={impactForPeriod.closing} />
-        </div>
-        <div className="md:col-span-5">
-          <div className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4">
-            <div className="text-sm font-medium text-zinc-100">Auto schedule entries (this month)</div>
-            <div className="mt-1 text-xs text-zinc-500">
-              Depreciation + loan schedules are injected into impact & balance sheet views automatically.
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4">
+                <div className="text-xs text-zinc-400">Period (YYYY-MM)</div>
+                <input
+                  value={state.periodMonth}
+                  onChange={(e) => setState((s) => ({ ...s, periodMonth: e.target.value }))}
+                  className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                  placeholder="2026-01"
+                />
+                <div className="mt-2 text-xs text-zinc-500">
+                  Impact includes: <span className="text-zinc-300">Saved + Scheduled</span> for this month.
+                </div>
+              </div>
             </div>
 
-            <div className="mt-3 flex items-center justify-between text-xs">
-              <span className="text-zinc-400">Generated</span>
-              <span className="text-zinc-200">{scheduledForPeriod.length}</span>
-            </div>
+            {/* tabs */}
+            <div className="flex flex-wrap gap-2">
+              <TabButton active={tab === "compose"} onClick={() => setTab("compose")}>
+                Compose
+              </TabButton>
+              <TabButton active={tab === "saved"} onClick={() => setTab("saved")}>
+                Saved Entries ({savedEntriesForMonth.length} this month)
+              </TabButton>
+              <TabButton active={tab === "schedules"} onClick={() => setTab("schedules")}>
+                Assets & Loans ({assets.length + loans.length})
+              </TabButton>
+              <TabButton active={tab === "impact"} onClick={() => setTab("impact")}>
+                Impact (Auto)
+              </TabButton>
 
-            <div className="mt-2 max-h-40 overflow-auto rounded-xl border border-zinc-800 bg-zinc-950/30">
-              {scheduledForPeriod.length === 0 ? (
-                <div className="px-3 py-2 text-xs text-zinc-500">No schedule entries for this month.</div>
-              ) : (
-                scheduledForPeriod.map((e) => (
-                  <div key={e.id} className="border-t border-zinc-800 px-3 py-2 text-xs">
-                    <div className="text-zinc-200">{e.memo}</div>
-                    <div className="mt-0.5 text-zinc-500">{e.dateISO}</div>
-                  </div>
-                ))
-              )}
-            </div>
-
-            <div className="mt-3 text-[11px] text-zinc-500">
-              Tip: these are <span className="text-zinc-300">not saved</span> unless you explicitly add a “save schedules” flow later.
-              They’re only for reporting/impact right now.
+              <div className="ml-auto flex flex-wrap gap-2">
+                <button
+                  onClick={() => {
+                    const e = defaultEntity(`Entity ${entities.length + 1}`);
+                    setEntities((prev) => [...prev, e]);
+                    setAccountsByEntity((prev) => ({ ...prev, [e.id]: [...defaultAccounts] }));
+                    setActiveEntityId(e.id);
+                  }}
+                  className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-xs text-zinc-200 hover:border-zinc-700"
+                >
+                  + Add entity
+                </button>
+                <button
+                  onClick={addAsset}
+                  className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-xs text-zinc-200 hover:border-zinc-700"
+                >
+                  + Add asset
+                </button>
+                <button
+                  onClick={addLoan}
+                  className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-xs text-zinc-200 hover:border-zinc-700"
+                >
+                  + Add loan
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      </div>
+        </CardContent>
+      </Card>
 
-      {tab === "copilot" ? (
-        <>
-          <Card>
-            <CardHeader title="Accounting Copilot" subtitle="Type naturally, then generate journal entries for the active entity." />
-            <CardContent>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-12">
-                <div className="md:col-span-8">
-                  <label className="text-xs text-zinc-400">Command</label>
-                  <textarea
-                    ref={textareaRef}
-                    value={state.text}
-                    onChange={(e) => setState((s) => ({ ...s, text: e.target.value }))}
-                    className="mt-2 min-h-35 w-full resize-none rounded-2xl border border-zinc-800 bg-zinc-950/40 px-4 py-3 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-zinc-700"
-                    placeholder={`Examples:
-- spent 120 aed on marketing
-- bought printer for 600 aed
-- sold services for 2000 aed
-- borrowed 10000 aed from bank`}
-                  />
-
-                  <QuickActions visible={true} onPick={applyActionTemplate} />
-
-                  <div className="mt-4 flex flex-wrap items-center gap-2">
-                    <button
-                      onClick={generatePreview}
-                      className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-2 text-xs text-zinc-200 hover:border-zinc-700"
-                    >
-                      Generate Entries
-                    </button>
-
-                    <button
-                      disabled={!generatedEntries.length}
-                      onClick={saveGeneratedToLedger}
-                      className={[
-                        "rounded-xl border px-4 py-2 text-xs",
-                        generatedEntries.length
-                          ? "border-emerald-700 bg-emerald-900/30 text-emerald-200 hover:bg-emerald-900/40"
-                          : "border-zinc-800 bg-zinc-950/20 text-zinc-500",
-                      ].join(" ")}
-                    >
-                      Save to Ledger
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        setGeneratedEntries([]);
-                        setLastEventsCount(0);
-                      }}
-                      className="rounded-xl border border-zinc-800 bg-zinc-950/30 px-4 py-2 text-xs text-zinc-300 hover:border-zinc-700"
-                    >
-                      Clear Preview
-                    </button>
-
-                    <div className="ml-auto text-xs text-zinc-500">
-                      Parsed events: <span className="text-zinc-300">{lastEventsCount}</span>
-                    </div>
-                  </div>
+      {/* COMPOSE */}
+      {tab === "compose" ? (
+        <Card className="mt-6">
+          <CardHeader
+            title="Describe what happened"
+            subtitle="Generate preview entries (strict account allow-list). Then Save."
+          />
+          <CardContent>
+            <div className="flex flex-col gap-4">
+              <div>
+                <label className="mb-2 block text-xs text-zinc-400">Prompt</label>
+                <textarea
+                  value={state.text}
+                  onChange={(e) => setState((s) => ({ ...s, text: e.target.value }))}
+                  className="min-h-[140px] w-full resize-none rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4 text-sm text-zinc-100 outline-none focus:border-zinc-700"
+                  placeholder={`Examples:
+On 25/12/25 I borrowed 1000. Then I lent 500 on 26/12/25.
+I spent 300 cash on marketing.
+I bought 300 AED worth of goods.
+I bought 1200 AED equipment (use Purchases / Expense unless you created Equipment).`}
+                />
+                <div className="mt-2 text-xs text-zinc-400">
+                  Strict rule: it will <span className="text-zinc-200">never invent accounts</span>. It only maps to closest existing,
+                  otherwise marks as unrecognized.
                 </div>
 
-                <div className="md:col-span-4 space-y-4">
-                  <div className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4">
-                    <div className="text-sm font-medium text-zinc-100">Defaults</div>
-
-                    <div className="mt-3 grid grid-cols-1 gap-3">
-                      <div>
-                        <label className="text-xs text-zinc-400">Currency</label>
-                        <select
-                          value={state.currency}
-                          onChange={(e) => setState((s) => ({ ...s, currency: e.target.value as Currency }))}
-                          className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                {unresolvedAccounts.length > 0 ? (
+                  <div className="mt-3 rounded-2xl border border-amber-800 bg-amber-950/30 p-3">
+                    <div className="text-xs font-medium text-amber-200">Unrecognized accounts (not auto-created)</div>
+                    <div className="mt-1 text-xs text-amber-200/80">
+                      Create them in your chart or rephrase using an existing account name.
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {unresolvedAccounts.map((a) => (
+                        <span
+                          key={a}
+                          className="rounded-xl border border-amber-800 bg-amber-950/20 px-2 py-1 text-[11px] text-amber-100"
                         >
-                          {currencies.map((c) => (
-                            <option key={c} value={c}>
-                              {c}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
+                          {a}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
 
-                      <label className="flex items-center gap-2 text-sm text-zinc-200">
-                        <input type="checkbox" checked={state.vatEnabled} onChange={(e) => setState((s) => ({ ...s, vatEnabled: e.target.checked }))} />
+                {Object.keys(resolvedHints).length > 0 ? (
+                  <div className="mt-3 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-3">
+                    <div className="text-xs font-medium text-zinc-200">Auto-mapped to closest accounts</div>
+                    <div className="mt-2 space-y-1">
+                      {Object.entries(resolvedHints).map(([from, to]) => (
+                        <div key={from} className="text-xs text-zinc-400">
+                          <span className="text-zinc-200">{from}</span> → <span className="text-zinc-100">{to}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                <div className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4">
+                  <div className="text-xs text-zinc-400">Currency</div>
+                  <select
+                    value={state.currency}
+                    onChange={(e) => setState((s) => ({ ...s, currency: e.target.value as Currency }))}
+                    className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                  >
+                    <option value="AED">AED</option>
+                    <option value="USD">USD</option>
+                    <option value="EUR">EUR</option>
+                  </select>
+                </div>
+
+                <div className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4">
+                  <div className="text-xs text-zinc-400">Mode</div>
+                  <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={state.useARAP}
+                      onChange={(e) => setState((s) => ({ ...s, useARAP: e.target.checked }))}
+                    />
+                    Use A/R & A/P instead of Cash
+                  </label>
+                </div>
+
+                <div className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4">
+                  <div className="text-xs text-zinc-400">Generate</div>
+                  <div className="mt-2 text-sm text-zinc-100">Detected events: {eventsCount}</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    Preview entries: <span className="text-zinc-300">{previewEntries.length}</span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={generatePreview}
+                    className="mt-3 w-full rounded-xl border border-emerald-700 bg-emerald-900/30 px-3 py-2 text-xs font-medium text-emerald-200 hover:bg-emerald-900/40"
+                  >
+                    Generate Preview
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={savePreviewEntries}
+                    disabled={!previewEntries.length}
+                    className={[
+                      "mt-2 w-full rounded-xl border px-3 py-2 text-xs font-medium",
+                      previewEntries.length
+                        ? "border-zinc-700 bg-zinc-900/40 text-zinc-200 hover:border-zinc-600"
+                        : "border-zinc-900 bg-zinc-950/20 text-zinc-600 cursor-not-allowed",
+                    ].join(" ")}
+                  >
+                    Save Preview Entries
+                  </button>
+                </div>
+              </div>
+
+              {needsVATControls ? (
+                <div className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs text-zinc-400">VAT</div>
+                      <div className="mt-1 text-sm text-zinc-100">UAE default 5%</div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-4">
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={state.vatEnabled}
+                          onChange={(e) => setState((s) => ({ ...s, vatEnabled: e.target.checked }))}
+                        />
                         VAT enabled
                       </label>
 
-                      <div className="grid grid-cols-2 gap-3">
-                        <div>
-                          <label className="text-xs text-zinc-400">VAT rate</label>
-                          <input
-                            inputMode="decimal"
-                            value={state.vatRate}
-                            onChange={(e) => setState((s) => ({ ...s, vatRate: Number(e.target.value) || 0 }))}
-                            className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
-                          />
-                        </div>
-
-                        <label className="mt-6 flex items-center gap-2 text-sm text-zinc-200">
-                          <input type="checkbox" checked={state.vatInclusive} onChange={(e) => setState((s) => ({ ...s, vatInclusive: e.target.checked }))} />
-                          Inclusive
-                        </label>
-                      </div>
-
-                      <label className="flex items-center gap-2 text-sm text-zinc-200">
-                        <input type="checkbox" checked={state.useARAP} onChange={(e) => setState((s) => ({ ...s, useARAP: e.target.checked }))} />
-                        Use A/R + A/P (instead of Cash)
+                      <label className="flex items-center gap-2 text-sm">
+                        <span className="text-zinc-400">Rate</span>
+                        <input
+                          inputMode="decimal"
+                          value={state.vatRate}
+                          onChange={(e) =>
+                            setState((s) => ({ ...s, vatRate: Math.max(0, Number(e.target.value) || 0) }))
+                          }
+                          className="w-24 rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                        />
                       </label>
 
-                      <div>
-                        <label className="text-xs text-zinc-400">Business Unit (optional)</label>
-                        <select
-                          value={state.businessUnitId ?? ""}
-                          onChange={(e) => setState((s) => ({ ...s, businessUnitId: e.target.value || undefined }))}
-                          className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
-                        >
-                          <option value="">(none)</option>
-                          {(activeEntity?.businessUnits ?? []).map((bu) => (
-                            <option key={bu.id} value={bu.id}>
-                              {bu.name}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={state.vatInclusive}
+                          onChange={(e) => setState((s) => ({ ...s, vatInclusive: e.target.checked }))}
+                        />
+                        Amount includes VAT
+                      </label>
                     </div>
                   </div>
+                </div>
+              ) : null}
 
-                  {/* This is now month-based + schedules (shown above), so keep this area clean */}
+              {/* Preview list */}
+              {previewEntries.length ? (
+                <div className="rounded-2xl border border-zinc-800 overflow-hidden">
+                  <div className="bg-zinc-950/40 px-4 py-3 text-sm font-medium text-zinc-100">Preview</div>
+                  {previewEntries.map((e) => (
+                    <div key={e.id} className="border-t border-zinc-800 p-4">
+                      <div className="text-sm text-zinc-100 font-medium">{e.dateISO} • {e.currency}</div>
+                      <div className="mt-1 text-xs text-zinc-400">{e.memo}</div>
+
+                      <div className="mt-3 grid grid-cols-12 bg-zinc-950/20 px-3 py-2 text-xs text-zinc-400 rounded-xl">
+                        <div className="col-span-6">Account</div>
+                        <div className="col-span-3 text-right">Debit</div>
+                        <div className="col-span-3 text-right">Credit</div>
+                      </div>
+                      <div className="mt-2 space-y-1">
+                        {e.lines.map((ln, idx) => (
+                          <div key={idx} className="grid grid-cols-12 px-1 text-sm">
+                            <div className="col-span-6 text-zinc-200">{ln.account}</div>
+                            <div className="col-span-3 text-right text-zinc-200">{ln.debit ? money(ln.debit) : "—"}</div>
+                            <div className="col-span-3 text-right text-zinc-200">{ln.credit ? money(ln.credit) : "—"}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {/* SAVED */}
+      {tab === "saved" ? (
+        <Card className="mt-6">
+          <CardHeader
+            title="Saved Journal Entries"
+            subtitle="These are your persisted entries. Impact tab uses these + scheduled entries for the selected month."
+          />
+          <CardContent>
+            <div className="flex flex-col gap-4">
+              {savedEntriesForMonth.length === 0 ? (
+                <div className="text-sm text-zinc-400">
+                  No saved entries in <span className="text-zinc-200">{periodMonth}</span>.
+                  Create some in Compose, or capitalize an asset in Schedules.
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {savedEntriesForMonth.map((e) => (
+                    <div key={e.id} className="rounded-2xl border border-zinc-800 overflow-hidden">
+                      <div className="flex items-start justify-between gap-3 border-b border-zinc-800 bg-zinc-950/40 px-4 py-3">
+                        <div>
+                          <div className="text-sm text-zinc-100 font-medium">
+                            {e.dateISO} • {e.currency}
+                          </div>
+                          <div className="mt-1 text-xs text-zinc-400">{e.memo}</div>
+                          <div className="mt-1 text-[11px] text-zinc-500">
+                            Entity: {entities.find((x) => x.id === e.entityId)?.name ?? e.entityId}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => setSavedEntries((prev) => prev.filter((x) => x.id !== e.id))}
+                          className="rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-xs text-zinc-200 hover:border-zinc-700"
+                        >
+                          Delete
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-12 bg-zinc-950/20 px-4 py-2 text-xs text-zinc-400">
+                        <div className="col-span-6">Account</div>
+                        <div className="col-span-3 text-right">Debit</div>
+                        <div className="col-span-3 text-right">Credit</div>
+                      </div>
+
+                      {e.lines.map((l, idx) => (
+                        <div key={idx} className="grid grid-cols-12 border-t border-zinc-800 px-4 py-2 text-sm">
+                          <div className="col-span-6 text-zinc-100">{l.account}</div>
+                          <div className="col-span-3 text-right text-zinc-200">{l.debit ? money(l.debit) : "—"}</div>
+                          <div className="col-span-3 text-right text-zinc-200">{l.credit ? money(l.credit) : "—"}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {/* SCHEDULES */}
+      {tab === "schedules" ? (
+        <Card className="mt-6">
+          <CardHeader
+            title="Assets & Loans (Schedules)"
+            subtitle="Add assets (depreciation) and loans (interest + principal). Scheduled entries auto-flow into Impact."
+          />
+          <CardContent>
+            <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+              {/* Assets */}
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-medium text-zinc-100">Assets</div>
+                    <div className="text-xs text-zinc-400">Monthly straight-line depreciation.</div>
+                  </div>
+                  <button
+                    onClick={addAsset}
+                    className="rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-xs text-zinc-200 hover:border-zinc-700"
+                  >
+                    + Add
+                  </button>
+                </div>
+
+                <div className="mt-4 space-y-3">
+                  {assets.filter((a) => a.entityId === activeEntityId).length === 0 ? (
+                    <div className="text-sm text-zinc-400">No assets for this entity.</div>
+                  ) : (
+                    assets
+                      .filter((a) => a.entityId === activeEntityId)
+                      .map((a) => (
+                        <div key={a.id} className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="w-full">
+                              <input
+                                value={a.name}
+                                onChange={(e) =>
+                                  setAssets((prev) => prev.map((x) => (x.id === a.id ? { ...x, name: e.target.value } : x)))
+                                }
+                                className="w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                              />
+                              <div className="mt-2 grid grid-cols-2 gap-2">
+                                <input
+                                  value={a.acquisitionDateISO}
+                                  onChange={(e) =>
+                                    setAssets((prev) =>
+                                      prev.map((x) => (x.id === a.id ? { ...x, acquisitionDateISO: e.target.value } : x))
+                                    )
+                                  }
+                                  className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                                  placeholder="YYYY-MM-DD"
+                                />
+                                <input
+                                  inputMode="decimal"
+                                  value={a.cost}
+                                  onChange={(e) =>
+                                    setAssets((prev) =>
+                                      prev.map((x) => (x.id === a.id ? { ...x, cost: Number(e.target.value) || 0 } : x))
+                                    )
+                                  }
+                                  className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                                  placeholder="Cost"
+                                />
+                                <input
+                                  inputMode="numeric"
+                                  value={a.usefulLifeMonths}
+                                  onChange={(e) =>
+                                    setAssets((prev) =>
+                                      prev.map((x) =>
+                                        x.id === a.id ? { ...x, usefulLifeMonths: Math.max(1, Number(e.target.value) || 1) } : x
+                                      )
+                                    )
+                                  }
+                                  className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                                  placeholder="Life (months)"
+                                />
+                                <button
+                                  onClick={() => capitalizeAssetToJournal(a)}
+                                  className="rounded-xl border border-emerald-700 bg-emerald-900/30 px-3 py-2 text-xs font-medium text-emerald-200 hover:bg-emerald-900/40"
+                                >
+                                  Capitalize (create journal)
+                                </button>
+                              </div>
+                            </div>
+
+                            <button
+                              onClick={() => setAssets((prev) => prev.filter((x) => x.id !== a.id))}
+                              className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-300 hover:border-zinc-700"
+                            >
+                              ✕
+                            </button>
+                          </div>
+
+                          <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-3">
+                            <input
+                              value={a.assetAccount}
+                              onChange={(e) =>
+                                setAssets((prev) => prev.map((x) => (x.id === a.id ? { ...x, assetAccount: e.target.value } : x)))
+                              }
+                              className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                              placeholder="Asset account"
+                            />
+                            <input
+                              value={a.accumulatedDepAccount}
+                              onChange={(e) =>
+                                setAssets((prev) =>
+                                  prev.map((x) => (x.id === a.id ? { ...x, accumulatedDepAccount: e.target.value } : x))
+                                )
+                              }
+                              className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                              placeholder="Accumulated dep."
+                            />
+                            <input
+                              value={a.depreciationExpenseAccount}
+                              onChange={(e) =>
+                                setAssets((prev) =>
+                                  prev.map((x) => (x.id === a.id ? { ...x, depreciationExpenseAccount: e.target.value } : x))
+                                )
+                              }
+                              className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                              placeholder="Depreciation expense"
+                            />
+                          </div>
+                        </div>
+                      ))
+                  )}
                 </div>
               </div>
-            </CardContent>
-          </Card>
 
-          <AccountsPanel accounts={activeAccounts} setAccounts={setAccountsForActiveEntity} />
+              {/* Loans */}
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-medium text-zinc-100">Loans</div>
+                    <div className="text-xs text-zinc-400">Interest-only + straight-line principal payment.</div>
+                  </div>
+                  <button
+                    onClick={addLoan}
+                    className="rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-xs text-zinc-200 hover:border-zinc-700"
+                  >
+                    + Add
+                  </button>
+                </div>
 
-          <EntryPreview accounts={activeAccounts} entries={generatedEntries} onChangeEntries={setGeneratedEntries} />
-        </>
+                <div className="mt-4 space-y-3">
+                  {loans.filter((l) => l.entityId === activeEntityId).length === 0 ? (
+                    <div className="text-sm text-zinc-400">No loans for this entity.</div>
+                  ) : (
+                    loans
+                      .filter((l) => l.entityId === activeEntityId)
+                      .map((l) => (
+                        <div key={l.id} className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="w-full">
+                              <input
+                                value={l.name}
+                                onChange={(e) =>
+                                  setLoans((prev) => prev.map((x) => (x.id === l.id ? { ...x, name: e.target.value } : x)))
+                                }
+                                className="w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                              />
+                              <div className="mt-2 grid grid-cols-2 gap-2">
+                                <input
+                                  value={l.startDateISO}
+                                  onChange={(e) =>
+                                    setLoans((prev) => prev.map((x) => (x.id === l.id ? { ...x, startDateISO: e.target.value } : x)))
+                                  }
+                                  className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                                  placeholder="YYYY-MM-DD"
+                                />
+                                <input
+                                  inputMode="decimal"
+                                  value={l.principal}
+                                  onChange={(e) =>
+                                    setLoans((prev) => prev.map((x) => (x.id === l.id ? { ...x, principal: Number(e.target.value) || 0 } : x)))
+                                  }
+                                  className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                                  placeholder="Principal"
+                                />
+                                <input
+                                  inputMode="decimal"
+                                  value={l.annualInterestRate}
+                                  onChange={(e) =>
+                                    setLoans((prev) => prev.map((x) => (x.id === l.id ? { ...x, annualInterestRate: Number(e.target.value) || 0 } : x)))
+                                  }
+                                  className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                                  placeholder="Annual rate (0.12)"
+                                />
+                                <input
+                                  inputMode="numeric"
+                                  value={l.termMonths}
+                                  onChange={(e) =>
+                                    setLoans((prev) => prev.map((x) => (x.id === l.id ? { ...x, termMonths: Math.max(1, Number(e.target.value) || 1) } : x)))
+                                  }
+                                  className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                                  placeholder="Term months"
+                                />
+                              </div>
+                            </div>
+
+                            <button
+                              onClick={() => setLoans((prev) => prev.filter((x) => x.id !== l.id))}
+                              className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-300 hover:border-zinc-700"
+                            >
+                              ✕
+                            </button>
+                          </div>
+
+                          <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-3">
+                            <input
+                              value={l.loanPayableAccount}
+                              onChange={(e) =>
+                                setLoans((prev) => prev.map((x) => (x.id === l.id ? { ...x, loanPayableAccount: e.target.value } : x)))
+                              }
+                              className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                              placeholder="Loan payable"
+                            />
+                            <input
+                              value={l.interestExpenseAccount}
+                              onChange={(e) =>
+                                setLoans((prev) => prev.map((x) => (x.id === l.id ? { ...x, interestExpenseAccount: e.target.value } : x)))
+                              }
+                              className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                              placeholder="Interest expense"
+                            />
+                            <input
+                              value={l.cashAccount}
+                              onChange={(e) =>
+                                setLoans((prev) => prev.map((x) => (x.id === l.id ? { ...x, cashAccount: e.target.value } : x)))
+                              }
+                              className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
+                              placeholder="Cash account"
+                            />
+                          </div>
+                        </div>
+                      ))
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4">
+              <div className="text-sm font-medium text-zinc-100">Scheduled entries preview (selected month)</div>
+              <div className="mt-1 text-xs text-zinc-400">
+                These entries are generated automatically into Impact. They are not “saved entries” unless you decide to materialize them later.
+              </div>
+
+              <div className="mt-3 space-y-3">
+                {scheduledEntriesForMonth.filter((e) => e.entityId === activeEntityId).length === 0 ? (
+                  <div className="text-sm text-zinc-400">No scheduled entries for this entity in {periodMonth}.</div>
+                ) : (
+                  scheduledEntriesForMonth
+                    .filter((e) => e.entityId === activeEntityId)
+                    .map((e) => (
+                      <div key={e.id} className="rounded-2xl border border-zinc-800 overflow-hidden">
+                        <div className="border-b border-zinc-800 bg-zinc-950/40 px-4 py-3">
+                          <div className="text-sm text-zinc-100 font-medium">{e.dateISO} • Scheduled</div>
+                          <div className="mt-1 text-xs text-zinc-400">{e.memo}</div>
+                        </div>
+                        {e.lines.map((ln, idx) => (
+                          <div key={idx} className="grid grid-cols-12 border-t border-zinc-800 px-4 py-2 text-sm">
+                            <div className="col-span-6 text-zinc-100">{ln.account}</div>
+                            <div className="col-span-3 text-right text-zinc-200">{ln.debit ? money(ln.debit) : "—"}</div>
+                            <div className="col-span-3 text-right text-zinc-200">{ln.credit ? money(ln.credit) : "—"}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ))
+                )}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
       ) : null}
 
-      {tab === "entities" ? (
-        <>
-          <EntitiesPanel
-            entities={entities}
-            setEntities={setEntities}
-            activeEntityId={activeEntityId}
-            setActiveEntityId={(id) => {
-              setActiveEntityId(id);
-              setState((s) => ({ ...s, entityId: id, businessUnitId: undefined }));
-            }}
+      {/* IMPACT */}
+      {tab === "impact" ? (
+        <Card className="mt-6">
+          <CardHeader
+            title="Impact (Selected Month)"
+            subtitle="This is the computed closing balances as-of end of month using: Saved entries + auto-generated depreciation + loan schedules."
           />
-          <AccountsPanel accounts={activeAccounts} setAccounts={setAccountsForActiveEntity} />
-        </>
-      ) : null}
+          <CardContent>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <BalanceGrid title={`Entity Closing Balances (${activeEntity?.name ?? activeEntityId})`} balances={impact} />
 
-      {tab === "balanceSheet" ? (
-        <>
-          <BalanceSheetPanel
-            title="Balance Sheet"
-            subtitle="This view automatically includes saved entries + schedule entries (depreciation + loan schedules) for the selected month."
-            accounts={activeAccounts}
-            entries={effectiveEntriesForPeriod}
-            period={selectedPeriod}
-          />
-        </>
-      ) : null}
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4">
+                <div className="text-sm font-medium text-zinc-100">What’s included</div>
+                <div className="mt-2 text-xs text-zinc-400">
+                  Month: <span className="text-zinc-200">{periodMonth}</span>
+                </div>
+                <div className="mt-2 space-y-1 text-xs text-zinc-400">
+                  <div>
+                    Saved entries in month: <span className="text-zinc-200">{savedEntriesForMonth.length}</span>
+                  </div>
+                  <div>
+                    Scheduled entries in month:{" "}
+                    <span className="text-zinc-200">
+                      {scheduledEntriesForMonth.filter((e) => e.entityId === activeEntityId).length}
+                    </span>
+                  </div>
+                  <div>
+                    Total considered (this entity):{" "}
+                    <span className="text-zinc-200">
+                      {monthEntriesAll.filter((e) => e.entityId === activeEntityId).length}
+                    </span>
+                  </div>
+                </div>
 
-      {tab === "consolidation" ? (
-        <>
-          <ConsolidationPreview entities={entities} accountsByEntity={accountsByEntity} entries={journalEntries} />
-        </>
-      ) : null}
+                <div className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-950/40 p-3">
+                  <div className="text-xs text-zinc-400">
+                    If you want a true Balance Sheet grouping (Assets/Liabilities/Equity) next, we’ll add account “types”.
+                    For now, this shows the raw closing balances that your schedules affect automatically.
+                  </div>
+                </div>
+              </div>
+            </div>
 
-      {tab === "ledger" ? (
-        <>
-          <SavedLedgerPanel
-            entities={entities}
-            activeEntityId={activeEntityId}
-            setActiveEntityId={(id) => {
-              setActiveEntityId(id);
-              setState((s) => ({ ...s, entityId: id, businessUnitId: undefined }));
-            }}
-            accountsByEntity={accountsByEntity}
-            journalEntries={journalEntries}
-            setJournalEntries={setJournalEntries}
-          />
-        </>
+            <div className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4">
+              <div className="text-sm font-medium text-zinc-100">Entries used (this month)</div>
+              <div className="mt-2 space-y-2">
+                {monthEntriesAll
+                  .filter((e) => e.entityId === activeEntityId)
+                  .map((e) => (
+                    <div key={e.id} className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <div className="text-sm text-zinc-100 font-medium">
+                            {e.dateISO} • {e.source === "scheduled" ? "Scheduled" : "Saved"}
+                          </div>
+                          <div className="mt-1 text-xs text-zinc-400">{e.memo}</div>
+                        </div>
+                      </div>
+                      <div className="mt-2 grid grid-cols-12 text-xs text-zinc-400">
+                        <div className="col-span-6">Account</div>
+                        <div className="col-span-3 text-right">Dr</div>
+                        <div className="col-span-3 text-right">Cr</div>
+                      </div>
+                      <div className="mt-1 space-y-1">
+                        {e.lines.map((ln, idx) => (
+                          <div key={idx} className="grid grid-cols-12 text-sm">
+                            <div className="col-span-6 text-zinc-200">{ln.account}</div>
+                            <div className="col-span-3 text-right text-zinc-200">{ln.debit ? money(ln.debit) : "—"}</div>
+                            <div className="col-span-3 text-right text-zinc-200">{ln.credit ? money(ln.credit) : "—"}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
       ) : null}
-    </div>
+    </>
   );
 }

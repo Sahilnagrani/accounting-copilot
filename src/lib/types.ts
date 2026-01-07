@@ -7,6 +7,8 @@ export type JournalLine = {
   credit: number;
 };
 
+export type JournalEntrySource = "saved" | "scheduled";
+
 export type JournalEntry = {
   id: string;
   dateISO: string;
@@ -14,6 +16,7 @@ export type JournalEntry = {
   currency: Currency;
   entityId: string;
   businessUnitId?: string;
+  source?: JournalEntrySource; // "saved" | "scheduled"
   lines: JournalLine[];
 };
 
@@ -49,12 +52,10 @@ export type ConsolidationMethod = "full" | "equity" | "none";
 
 export type IntercompanyEliminationPolicy = {
   enabled: boolean;
-
-  // account names used in your chart
-  arAccount: string; // e.g. "Intercompany Receivable"
-  apAccount: string; // e.g. "Intercompany Payable"
-  loanRecAccount: string; // e.g. "Intercompany Loan Receivable"
-  loanPayAccount: string; // e.g. "Intercompany Loan Payable"
+  arAccount: string;
+  apAccount: string;
+  loanRecAccount: string;
+  loanPayAccount: string;
 };
 
 export type EntityPolicy = {
@@ -84,12 +85,14 @@ export type ComposerState = {
 
   entityId: string;
   businessUnitId?: string;
+
+  // NEW: period selection (YYYY-MM)
+  periodMonth: string;
 };
 
 // -------------------------
-// Assets + Liabilities (NEW)
+// Schedules (Assets + Loans)
 // -------------------------
-
 export type DepreciationMethod = "straight_line_monthly";
 
 export type Asset = {
@@ -98,36 +101,29 @@ export type Asset = {
   businessUnitId?: string;
 
   name: string;
-  purchaseDateISO: string; // YYYY-MM-DD
+  acquisitionDateISO: string; // when purchased/capitalized
   cost: number;
-  salvageValue: number; // can be 0
-  usefulLifeMonths: number; // e.g. 36
 
-  currency: Currency;
-
-  // accounts (strictly use these names in the chart)
   assetAccount: string; // e.g. "Equipment"
   accumulatedDepAccount: string; // e.g. "Accumulated Depreciation"
   depreciationExpenseAccount: string; // e.g. "Depreciation Expense"
 
   method: DepreciationMethod;
+  usefulLifeMonths: number; // straight-line months
 };
 
-export type Liability = {
+export type Loan = {
   id: string;
   entityId: string;
   businessUnitId?: string;
 
   name: string;
-  startDateISO: string; // YYYY-MM-DD
+  startDateISO: string;
   principal: number;
-  annualInterestRate: number; // e.g. 0.08
-  termMonths: number; // e.g. 24
+  annualInterestRate: number; // e.g. 0.12 = 12%
+  termMonths: number;
 
-  currency: Currency;
-
-  // accounts (strictly use these names in the chart)
-  liabilityAccount: string; // e.g. "Loan Payable"
-  interestExpenseAccount: string; // e.g. "Interest Expense"
-  cashAccount: string; // e.g. "Cash"
+  loanPayableAccount: string; // "Loan Payable"
+  interestExpenseAccount: string; // "Interest Expense"
+  cashAccount: string; // "Cash"
 };
