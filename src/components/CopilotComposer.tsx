@@ -10,9 +10,14 @@ import AccountsPanel from "./AccountsPanel";
 import EntryPreview from "./EntryPreview";
 import ConsolidationPreview from "./ConsolidationPreview";
 import SavedLedgerPanel from "./SavedLedgerPanel";
+import BalanceSheetPanel from "./BalanceSheetPanel";
 
-import { generateEntriesFromText } from "@/lib/journalEngine";
-import { computeBalances, formatBalance } from "@/lib/journalEngine";
+import { generateEntriesFromText, computeBalances, formatBalance } from "@/lib/journalEngine";
+import {
+  generateScheduledEntriesForPeriod,
+  type AssetSchedule,
+  type LiabilitySchedule,
+} from "@/lib/schedulesEngine";
 
 /** -----------------------
  * LocalStorage keys
@@ -23,6 +28,11 @@ const LS = {
   journalEntries: "ac.journalEntries.v1",
   activeEntityId: "ac.activeEntityId.v1",
   composerState: "ac.composerState.v1",
+
+  // NEW: schedules storage (simple MVP)
+  assetSchedules: "ac.schedules.assets.v1", // AssetSchedule[]
+  liabilitySchedules: "ac.schedules.liabilities.v1", // LiabilitySchedule[]
+  selectedPeriod: "ac.selectedPeriod.v1", // YYYY-MM
 };
 
 function safeJSONParse<T>(s: string | null): T | null {
@@ -39,6 +49,13 @@ function makeId() {
 }
 
 const currencies: Currency[] = ["AED", "USD", "EUR"];
+
+function yyyyMMNow() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${yyyy}-${mm}`;
+}
 
 function defaultEntity(name: string): Entity {
   return {
@@ -73,7 +90,12 @@ function defaultChart(): Account[] {
     { id: makeId(), name: "Input VAT", normalSide: "debit", openingBalance: 0 },
     { id: makeId(), name: "Output VAT", normalSide: "credit", openingBalance: 0 },
 
-    // Intercompany defaults (for eliminations demo)
+    // Schedules defaults (so balances look nice immediately)
+    { id: makeId(), name: "Depreciation Expense", normalSide: "debit", openingBalance: 0 },
+    { id: makeId(), name: "Accumulated Depreciation", normalSide: "credit", openingBalance: 0 },
+    { id: makeId(), name: "Interest Expense", normalSide: "debit", openingBalance: 0 },
+
+    // Intercompany defaults
     { id: makeId(), name: "Intercompany Receivable", normalSide: "debit", openingBalance: 0 },
     { id: makeId(), name: "Intercompany Payable", normalSide: "credit", openingBalance: 0 },
     { id: makeId(), name: "Intercompany Loan Receivable", normalSide: "debit", openingBalance: 0 },
@@ -94,11 +116,11 @@ function QuickActions({
   if (!visible) return null;
 
   const items: { k: ActionKind; label: string; hint: string }[] = [
-    { k: "spend", label: "Spend", hint: "e.g. spent 120 aed on office supplies" },
-    { k: "buy", label: "Buy", hint: "e.g. bought printer for 600 aed" },
-    { k: "sell", label: "Sell", hint: "e.g. sold consulting for 2000 aed" },
-    { k: "lend", label: "Lend", hint: "e.g. lent 500 aed to friend" },
-    { k: "borrow", label: "Borrow", hint: "e.g. borrowed 1000 aed from bank" },
+    { k: "spend", label: "Spend", hint: "spent 120 aed on office supplies" },
+    { k: "buy", label: "Buy", hint: "bought printer for 600 aed" },
+    { k: "sell", label: "Sell", hint: "sold consulting for 2000 aed" },
+    { k: "lend", label: "Lend", hint: "lent 500 aed to friend" },
+    { k: "borrow", label: "Borrow", hint: "borrowed 10000 aed from bank" },
   ];
 
   return (
@@ -113,9 +135,7 @@ function QuickActions({
             title={x.hint}
           >
             <div className="text-zinc-100">{x.label}</div>
-            <div className="mt-0.5 text-[11px] text-zinc-500 group-hover:text-zinc-400">
-              {x.hint}
-            </div>
+            <div className="mt-0.5 text-[11px] text-zinc-500 group-hover:text-zinc-400">{x.hint}</div>
           </button>
         ))}
       </div>
@@ -160,9 +180,7 @@ function BalanceMini({
           );
         })
       )}
-      <div className="border-t border-zinc-800 px-4 py-2 text-xs text-zinc-500">
-        Showing top 8 (for quick glance)
-      </div>
+      <div className="border-t border-zinc-800 px-4 py-2 text-xs text-zinc-500">Showing top 8</div>
     </div>
   );
 }
@@ -196,6 +214,27 @@ export default function CopilotComposer() {
     return saved ?? [];
   });
 
+  // NEW: schedules (MVP storage)
+  const [assetSchedules, setAssetSchedules] = useState<AssetSchedule[]>(() => {
+    const saved = safeJSONParse<AssetSchedule[]>(
+      typeof window !== "undefined" ? localStorage.getItem(LS.assetSchedules) : null
+    );
+    return saved ?? [];
+  });
+
+  const [liabilitySchedules, setLiabilitySchedules] = useState<LiabilitySchedule[]>(() => {
+    const saved = safeJSONParse<LiabilitySchedule[]>(
+      typeof window !== "undefined" ? localStorage.getItem(LS.liabilitySchedules) : null
+    );
+    return saved ?? [];
+  });
+
+  // NEW: selected month filter
+  const [selectedPeriod, setSelectedPeriod] = useState<string>(() => {
+    const saved = typeof window !== "undefined" ? localStorage.getItem(LS.selectedPeriod) : null;
+    return saved ?? yyyyMMNow();
+  });
+
   const [state, setState] = useState<ComposerState>(() => {
     const saved = safeJSONParse<ComposerState>(
       typeof window !== "undefined" ? localStorage.getItem(LS.composerState) : null
@@ -214,7 +253,9 @@ export default function CopilotComposer() {
     );
   });
 
-  const [tab, setTab] = useState<"copilot" | "entities" | "consolidation" | "ledger">("copilot");
+  const [tab, setTab] = useState<"copilot" | "entities" | "consolidation" | "ledger" | "balanceSheet">(
+    "copilot"
+  );
 
   const [generatedEntries, setGeneratedEntries] = useState<JournalEntry[]>([]);
   const [lastEventsCount, setLastEventsCount] = useState(0);
@@ -227,14 +268,12 @@ export default function CopilotComposer() {
   useEffect(() => {
     if (!entities.length) return;
 
-    // If no active entity yet, pick first (no ESLint "setState in effect" issue if we guard properly)
     if (!activeEntityId) {
       setActiveEntityId(entities[0].id);
       setState((s) => ({ ...s, entityId: entities[0].id }));
       return;
     }
 
-    // If active entity was deleted, snap to first
     const stillExists = entities.some((e) => e.id === activeEntityId);
     if (!stillExists) {
       const fallback = entities[0].id;
@@ -252,19 +291,21 @@ export default function CopilotComposer() {
     setAccountsByEntity((prev) => {
       let changed = false;
       const next = { ...prev };
+
       for (const e of entities) {
         if (!next[e.id] || next[e.id].length === 0) {
           next[e.id] = defaultChart();
           changed = true;
         }
       }
-      // prune removed entities
+
       for (const k of Object.keys(next)) {
         if (!entities.some((e) => e.id === k)) {
           delete next[k];
           changed = true;
         }
       }
+
       return changed ? next : prev;
     });
   }, [entities]);
@@ -272,25 +313,18 @@ export default function CopilotComposer() {
   /** -----------------------
    * Persist
    * ---------------------- */
-  useEffect(() => {
-    localStorage.setItem(LS.entities, JSON.stringify(entities));
-  }, [entities]);
-
+  useEffect(() => localStorage.setItem(LS.entities, JSON.stringify(entities)), [entities]);
   useEffect(() => {
     if (activeEntityId) localStorage.setItem(LS.activeEntityId, activeEntityId);
   }, [activeEntityId]);
+  useEffect(() => localStorage.setItem(LS.accountsByEntity, JSON.stringify(accountsByEntity)), [accountsByEntity]);
+  useEffect(() => localStorage.setItem(LS.journalEntries, JSON.stringify(journalEntries)), [journalEntries]);
+  useEffect(() => localStorage.setItem(LS.composerState, JSON.stringify(state)), [state]);
 
-  useEffect(() => {
-    localStorage.setItem(LS.accountsByEntity, JSON.stringify(accountsByEntity));
-  }, [accountsByEntity]);
-
-  useEffect(() => {
-    localStorage.setItem(LS.journalEntries, JSON.stringify(journalEntries));
-  }, [journalEntries]);
-
-  useEffect(() => {
-    localStorage.setItem(LS.composerState, JSON.stringify(state));
-  }, [state]);
+  // NEW: persist schedules + period
+  useEffect(() => localStorage.setItem(LS.assetSchedules, JSON.stringify(assetSchedules)), [assetSchedules]);
+  useEffect(() => localStorage.setItem(LS.liabilitySchedules, JSON.stringify(liabilitySchedules)), [liabilitySchedules]);
+  useEffect(() => localStorage.setItem(LS.selectedPeriod, selectedPeriod), [selectedPeriod]);
 
   /** -----------------------
    * Derived
@@ -305,23 +339,38 @@ export default function CopilotComposer() {
     [accountsByEntity, activeEntityId]
   );
 
-  const allowedAccountNames = useMemo(
-    () => activeAccounts.map((a) => a.name),
-    [activeAccounts]
-  );
+  const allowedAccountNames = useMemo(() => activeAccounts.map((a) => a.name), [activeAccounts]);
 
   const savedForActiveEntity = useMemo(
     () => journalEntries.filter((e) => e.entityId === activeEntityId),
     [journalEntries, activeEntityId]
   );
 
-  const quickImpact = useMemo(() => {
-    const { opening, closing } = computeBalances(activeAccounts, savedForActiveEntity);
+  // ✅ NEW: Scheduled entries for selectedPeriod, auto-added to impact tabs
+  const scheduledForPeriod = useMemo(() => {
+    return generateScheduledEntriesForPeriod({
+      period: selectedPeriod,
+      entityId: activeEntityId,
+      savedEntries: journalEntries, // dedupe against all saved
+      schedules: { assets: assetSchedules, liabilities: liabilitySchedules },
+    });
+  }, [selectedPeriod, activeEntityId, journalEntries, assetSchedules, liabilitySchedules]);
+
+  // ✅ NEW: month-filtered entries including schedules (no double count)
+  const effectiveEntriesForPeriod = useMemo(() => {
+    const savedInPeriod = savedForActiveEntity.filter((e) => (e.dateISO ?? "").startsWith(selectedPeriod));
+    // scheduledForPeriod is already deduped vs saved using markers
+    return [...savedInPeriod, ...scheduledForPeriod];
+  }, [savedForActiveEntity, scheduledForPeriod, selectedPeriod]);
+
+  // ✅ NEW: impact uses selected month + schedules
+  const impactForPeriod = useMemo(() => {
+    const { opening, closing } = computeBalances(activeAccounts, effectiveEntriesForPeriod);
     return { opening, closing };
-  }, [activeAccounts, savedForActiveEntity]);
+  }, [activeAccounts, effectiveEntriesForPeriod]);
 
   /** -----------------------
-   * Helpers to satisfy TS types
+   * Helpers: satisfy TS for AccountsPanel
    * ---------------------- */
   const setAccountsForActiveEntity: React.Dispatch<React.SetStateAction<Account[]>> = (value) => {
     setAccountsByEntity((prev) => {
@@ -344,10 +393,7 @@ export default function CopilotComposer() {
     };
 
     const t = templates[k];
-    setState((s) => ({
-      ...s,
-      text: s.text.trim() ? `${s.text.trim()}\n${t}` : t,
-    }));
+    setState((s) => ({ ...s, text: s.text.trim() ? `${s.text.trim()}\n${t}` : t }));
     setTab("copilot");
     requestAnimationFrame(() => textareaRef.current?.focus());
   }
@@ -401,6 +447,7 @@ export default function CopilotComposer() {
             [
               ["copilot", "Copilot"],
               ["entities", "Entities"],
+              ["balanceSheet", "Balance Sheet"],
               ["consolidation", "Consolidation"],
               ["ledger", "Ledger"],
             ] as const
@@ -420,8 +467,7 @@ export default function CopilotComposer() {
           ))}
         </div>
 
-        {/* active entity chip */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-zinc-500">Active:</span>
           <select
             value={activeEntityId}
@@ -438,16 +484,59 @@ export default function CopilotComposer() {
               </option>
             ))}
           </select>
+
+          <span className="ml-2 text-xs text-zinc-500">Month:</span>
+          <input
+            type="month"
+            value={selectedPeriod}
+            onChange={(e) => setSelectedPeriod(e.target.value)}
+            className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-zinc-700"
+          />
+        </div>
+      </div>
+
+      {/* Period impact summary (includes schedules automatically) */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-12">
+        <div className="md:col-span-7">
+          <BalanceMini title={`Impact (saved + schedules) • ${selectedPeriod}`} balances={impactForPeriod.closing} />
+        </div>
+        <div className="md:col-span-5">
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4">
+            <div className="text-sm font-medium text-zinc-100">Auto schedule entries (this month)</div>
+            <div className="mt-1 text-xs text-zinc-500">
+              Depreciation + loan schedules are injected into impact & balance sheet views automatically.
+            </div>
+
+            <div className="mt-3 flex items-center justify-between text-xs">
+              <span className="text-zinc-400">Generated</span>
+              <span className="text-zinc-200">{scheduledForPeriod.length}</span>
+            </div>
+
+            <div className="mt-2 max-h-40 overflow-auto rounded-xl border border-zinc-800 bg-zinc-950/30">
+              {scheduledForPeriod.length === 0 ? (
+                <div className="px-3 py-2 text-xs text-zinc-500">No schedule entries for this month.</div>
+              ) : (
+                scheduledForPeriod.map((e) => (
+                  <div key={e.id} className="border-t border-zinc-800 px-3 py-2 text-xs">
+                    <div className="text-zinc-200">{e.memo}</div>
+                    <div className="mt-0.5 text-zinc-500">{e.dateISO}</div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="mt-3 text-[11px] text-zinc-500">
+              Tip: these are <span className="text-zinc-300">not saved</span> unless you explicitly add a “save schedules” flow later.
+              They’re only for reporting/impact right now.
+            </div>
+          </div>
         </div>
       </div>
 
       {tab === "copilot" ? (
         <>
           <Card>
-            <CardHeader
-              title="Accounting Copilot"
-              subtitle="Type naturally, then generate journal entries for the active entity."
-            />
+            <CardHeader title="Accounting Copilot" subtitle="Type naturally, then generate journal entries for the active entity." />
             <CardContent>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-12">
                 <div className="md:col-span-8">
@@ -456,12 +545,12 @@ export default function CopilotComposer() {
                     ref={textareaRef}
                     value={state.text}
                     onChange={(e) => setState((s) => ({ ...s, text: e.target.value }))}
+                    className="mt-2 min-h-35 w-full resize-none rounded-2xl border border-zinc-800 bg-zinc-950/40 px-4 py-3 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-zinc-700"
                     placeholder={`Examples:
 - spent 120 aed on marketing
 - bought printer for 600 aed
 - sold services for 2000 aed
 - borrowed 10000 aed from bank`}
-                    className="mt-2 min-h-35 w-full resize-none rounded-2xl border border-zinc-800 bg-zinc-950/40 px-4 py-3 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-zinc-700"
                   />
 
                   <QuickActions visible={true} onPick={applyActionTemplate} />
@@ -524,11 +613,7 @@ export default function CopilotComposer() {
                       </div>
 
                       <label className="flex items-center gap-2 text-sm text-zinc-200">
-                        <input
-                          type="checkbox"
-                          checked={state.vatEnabled}
-                          onChange={(e) => setState((s) => ({ ...s, vatEnabled: e.target.checked }))}
-                        />
+                        <input type="checkbox" checked={state.vatEnabled} onChange={(e) => setState((s) => ({ ...s, vatEnabled: e.target.checked }))} />
                         VAT enabled
                       </label>
 
@@ -544,21 +629,13 @@ export default function CopilotComposer() {
                         </div>
 
                         <label className="mt-6 flex items-center gap-2 text-sm text-zinc-200">
-                          <input
-                            type="checkbox"
-                            checked={state.vatInclusive}
-                            onChange={(e) => setState((s) => ({ ...s, vatInclusive: e.target.checked }))}
-                          />
+                          <input type="checkbox" checked={state.vatInclusive} onChange={(e) => setState((s) => ({ ...s, vatInclusive: e.target.checked }))} />
                           Inclusive
                         </label>
                       </div>
 
                       <label className="flex items-center gap-2 text-sm text-zinc-200">
-                        <input
-                          type="checkbox"
-                          checked={state.useARAP}
-                          onChange={(e) => setState((s) => ({ ...s, useARAP: e.target.checked }))}
-                        />
+                        <input type="checkbox" checked={state.useARAP} onChange={(e) => setState((s) => ({ ...s, useARAP: e.target.checked }))} />
                         Use A/R + A/P (instead of Cash)
                       </label>
 
@@ -566,9 +643,7 @@ export default function CopilotComposer() {
                         <label className="text-xs text-zinc-400">Business Unit (optional)</label>
                         <select
                           value={state.businessUnitId ?? ""}
-                          onChange={(e) =>
-                            setState((s) => ({ ...s, businessUnitId: e.target.value || undefined }))
-                          }
+                          onChange={(e) => setState((s) => ({ ...s, businessUnitId: e.target.value || undefined }))}
                           className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-700"
                         >
                           <option value="">(none)</option>
@@ -582,7 +657,7 @@ export default function CopilotComposer() {
                     </div>
                   </div>
 
-                  <BalanceMini title="Saved Impact (All-time, active entity)" balances={quickImpact.closing} />
+                  {/* This is now month-based + schedules (shown above), so keep this area clean */}
                 </div>
               </div>
             </CardContent>
@@ -590,11 +665,7 @@ export default function CopilotComposer() {
 
           <AccountsPanel accounts={activeAccounts} setAccounts={setAccountsForActiveEntity} />
 
-          <EntryPreview
-            accounts={activeAccounts}
-            entries={generatedEntries}
-            onChangeEntries={setGeneratedEntries}
-          />
+          <EntryPreview accounts={activeAccounts} entries={generatedEntries} onChangeEntries={setGeneratedEntries} />
         </>
       ) : null}
 
@@ -609,18 +680,25 @@ export default function CopilotComposer() {
               setState((s) => ({ ...s, entityId: id, businessUnitId: undefined }));
             }}
           />
-
           <AccountsPanel accounts={activeAccounts} setAccounts={setAccountsForActiveEntity} />
+        </>
+      ) : null}
+
+      {tab === "balanceSheet" ? (
+        <>
+          <BalanceSheetPanel
+            title="Balance Sheet"
+            subtitle="This view automatically includes saved entries + schedule entries (depreciation + loan schedules) for the selected month."
+            accounts={activeAccounts}
+            entries={effectiveEntriesForPeriod}
+            period={selectedPeriod}
+          />
         </>
       ) : null}
 
       {tab === "consolidation" ? (
         <>
-          <ConsolidationPreview
-            entities={entities}
-            accountsByEntity={accountsByEntity}
-            entries={journalEntries}
-          />
+          <ConsolidationPreview entities={entities} accountsByEntity={accountsByEntity} entries={journalEntries} />
         </>
       ) : null}
 
